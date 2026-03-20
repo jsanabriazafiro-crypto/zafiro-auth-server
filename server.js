@@ -88,7 +88,7 @@ const fullBody = { …body, client_id: LS_CLIENT_ID, client_secret: LS_CLIENT_SE
 const params = new URLSearchParams(fullBody).toString();
 const req = https.request({
 hostname: ‘cloud.lightspeedapp.com’,
-path: ‘/oauth/access_token.php’,
+path: '/oauth/access_token.php',
 method: ‘POST’,
 headers: {
 ‘Content-Type’: ‘application/x-www-form-urlencoded’,
