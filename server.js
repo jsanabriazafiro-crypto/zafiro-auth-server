@@ -83,9 +83,10 @@ function lightspeedGet(endpoint) {
 // ── Helper: POST to Lightspeed OAuth ─────────────────────────────────────────
 function lightspeedTokenPost(body) {
   return new Promise((resolve, reject) => {
-    // Lightspeed R-Series: client_id and client_secret go in the body
+    // Lightspeed R-Series: Basic Auth header + credentials in body
     const fullBody = { ...body, client_id: LS_CLIENT_ID, client_secret: LS_CLIENT_SECRET };
     const params = new URLSearchParams(fullBody).toString();
+    const auth = Buffer.from(`${LS_CLIENT_ID}:${LS_CLIENT_SECRET}`).toString('base64');
     const req = https.request({
       hostname: 'cloud.lightspeedapp.com',
       path: '/oauth/access_token.php',
@@ -93,6 +94,7 @@ function lightspeedTokenPost(body) {
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
         'Accept': 'application/json',
+        'Authorization': `Basic ${auth}`,
         'Content-Length': Buffer.byteLength(params)
       }
     }, res => {
