@@ -201,9 +201,11 @@ function normalizeSales(sales) {
     // Shop/Register info comes directly on Sale object (not as loaded relation)
     // shopName and registerName are flat fields in the Sale response
     const shopName = s.shopName || s.Shop?.name || '';
-    const empName  = s.Employee
-      ? `${s.Employee.firstName || ''} ${s.Employee.lastName || ''}`.trim()
-      : (s.employeeID ? `Employee#${s.employeeID}` : '');
+    // Employee name comes as direct field on Sale (employeeName)
+    // when Employee relation is not loaded
+    const empName = s.employeeName || 
+      (s.Employee ? `${s.Employee.firstName||''} ${s.Employee.lastName||''}`.trim() : '') ||
+      (s.employeeID ? `Emp#${s.employeeID}` : '');
     return {
       ID:        String(s.saleID || ''),
       Completed: (s.completed === 'true' || s.completed === true) ? 'Yes' : 'No',
@@ -314,9 +316,8 @@ async function runSyncBackground(from, to) {
     let transactions = [];
     try {
       const raw = await lsFetchAll('Sale', {
-        load_relations: JSON.stringify(['Employee', 'Customer']),
-        'timeStamp][>=': `${from} 00:00:00`,
-        'timeStamp][<=': `${to} 23:59:59`,
+        load_relations: JSON.stringify(['Customer']),
+        timeStamp: `>,${from} 00:00:00,<,${to} 23:59:59`,
         completed: 'true',
       }, (n, total) => {
         syncState.message = `Transacciones: ${n}${total ? '/'+total : ''}...`;
