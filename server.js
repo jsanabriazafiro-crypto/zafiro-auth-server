@@ -62,7 +62,7 @@ async function getLSToken() {
 
 // ── Lightspeed fetch con cursor pagination ────────────────────────
 // V3 API ya no soporta offset — usa after/next cursor
-async function lsFetchAll(endpoint, params = {}) {
+async function lsFetchAll(endpoint, params = {}, onProgress = null) {
   const token = await getLSToken();
   const base  = `/API/V3/Account/${LS_ACCOUNT_ID}`;
   const all   = [];
@@ -98,6 +98,7 @@ async function lsFetchAll(endpoint, params = {}) {
 
     const total = parseInt(attrs.count || 0);
     console.log(`[LS] ${endpoint}: ${all.length}/${total || '?'}`);
+    if (onProgress) onProgress(all.length, total || 0);
 
     // Cursor pagination — usar 'after' token si existe
     if (attrs.next) {
@@ -235,6 +236,108 @@ const cache = {};
 const getCached = (k, ttl) => { const h = cache[k]; return h && Date.now()-h.ts < ttl ? h.data : null; };
 const setCache  = (k, d)   => { cache[k] = { ts: Date.now(), data: d }; };
 
+// ── Background sync state ─────────────────────────────────────────
+const syncState = {
+  running: false,
+  progress: 0,
+  message: '',
+  result: null,
+  error: null,
+  startedAt: null,
+  key: null,
+};
+
+async function runSyncBackground(from, to) {
+  if (syncState.running) return; // already running
+  syncState.running  = true;
+  syncState.progress = 0;
+  syncState.result   = null;
+  syncState.error    = null;
+  syncState.startedAt = new Date().toISOString();
+  syncState.key = `${from}_${to}`;
+
+  try {
+    const errors = [];
+
+    // Transacciones
+    syncState.message = 'Descargando transacciones...';
+    syncState.progress = 10;
+    let transactions = [];
+    try {
+      const raw = await lsFetchAll('Sale', {
+        load_relations: JSON.stringify(['Employee', 'Customer']),
+        'timeStamp][>=': `${from} 00:00:00`,
+        'timeStamp][<=': `${to} 23:59:59`,
+        completed: 'true',
+      }, (n, total) => {
+        syncState.message = `Transacciones: ${n}${total ? '/'+total : ''}...`;
+        syncState.progress = Math.min(10 + Math.round(n / (total||65000) * 30), 40);
+      });
+      transactions = normalizeSales(raw);
+      console.log(`[sync] Transactions: ${transactions.length}`);
+    } catch(e) {
+      console.error('[sync] Transactions error:', e.message);
+      errors.push({ source:'transactions', error:e.message });
+    }
+
+    // Lines
+    syncState.message = 'Descargando líneas de venta...';
+    syncState.progress = 45;
+    let lines = [];
+    try {
+      const raw = await lsFetchAll('SaleLine', {
+        load_relations: JSON.stringify(['Item']),
+        'timeStamp][>=': `${from} 00:00:00`,
+        'timeStamp][<=': `${to} 23:59:59`,
+      }, (n, total) => {
+        syncState.message = `Lines: ${n}${total ? '/'+total : ''}...`;
+        syncState.progress = Math.min(45 + Math.round(n / (total||80000) * 20), 65);
+      });
+      lines = normalizeLines(raw);
+      console.log(`[sync] Lines: ${lines.length}`);
+    } catch(e) {
+      console.error('[sync] Lines error:', e.message);
+      errors.push({ source:'lines', error:e.message });
+    }
+
+    // Inventario
+    syncState.message = 'Descargando inventario...';
+    syncState.progress = 70;
+    let inventory = [];
+    try {
+      const raw = await lsFetchAll('Item', {
+        load_relations: JSON.stringify(['Category', 'Manufacturer', 'ItemShops']),
+        archived: 'false',
+      }, (n, total) => {
+        syncState.message = `Inventario: ${n}${total ? '/'+total : ''}...`;
+        syncState.progress = Math.min(70 + Math.round(n / (total||45000) * 25), 95);
+      });
+      inventory = normalizeInventory(raw);
+      console.log(`[sync] Inventory: ${inventory.length}`);
+    } catch(e) {
+      console.error('[sync] Inventory error:', e.message);
+      errors.push({ source:'inventory', error:e.message });
+    }
+
+    const result = { ok:true, ts:new Date().toISOString(), from, to,
+      counts:{ transactions:transactions.length, lines:lines.length, inventory:inventory.length },
+      transactions, lines, inventory,
+      errors: errors.length ? errors : undefined };
+
+    if (!errors.length) setCache(syncState.key, result);
+    syncState.result   = result;
+    syncState.progress = 100;
+    syncState.message  = `✅ Completado — ${transactions.length} tx, ${lines.length} lines, ${inventory.length} items`;
+
+  } catch(e) {
+    console.error('[sync] Fatal error:', e.message);
+    syncState.error   = e.message;
+    syncState.message = '❌ Error: ' + e.message;
+  } finally {
+    syncState.running = false;
+  }
+}
+
 // ── Server ────────────────────────────────────────────────────────
 http.createServer(async (req, res) => {
   const u = new URL(req.url, 'http://x');
@@ -302,73 +405,43 @@ body{font-family:monospace;background:#0d0d1a;color:#F2EDE6;padding:40px;}
 <a href="/" style="color:#60a5fa">← Inicio</a></body></html>`);
     }
 
-    // SYNC
+    // SYNC — inicia en background, responde inmediatamente
     if (pathname === '/api/sync') {
       if (!LS_REFRESH_TOKEN) return J({ ok:false, error:'LS_REFRESH_TOKEN no configurado' }, 503);
       const { from, to } = query;
       if (!from || !to) return J({ ok:false, error:'Faltan from y to' }, 400);
 
-      const ck = `sync_${from}_${to}`;
+      // Check cache first
+      const ck = `${from}_${to}`;
       const cached = getCached(ck, 15*60*1000);
       if (cached) { console.log('[sync] Cache hit'); return J(cached); }
 
-      console.log(`[sync] Iniciando ${from} → ${to}`);
-      const errors = [];
-
-      // Transacciones
-      // Valid Sale relations: SaleLines, Customer, Employee, TaxCategory, ShipTo, Quote, Note, Contact, CCCharge, CustomField
-      // shopName and registerName come as direct fields - no need to load Shop/Register
-      let transactions = [];
-      try {
-        const raw = await lsFetchAll('Sale', {
-          load_relations: JSON.stringify(['Employee', 'Customer']),
-          'timeStamp][>=': `${from} 00:00:00`,
-          'timeStamp][<=': `${to} 23:59:59`,
-          completed: 'true',
-        });
-        transactions = normalizeSales(raw);
-        console.log(`[sync] Transactions: ${transactions.length}`);
-      } catch(e) {
-        console.error('[sync] Transactions error:', e.message);
-        errors.push({ source:'transactions', error:e.message });
+      // If sync already running for same range, return status
+      if (syncState.running && syncState.key === ck) {
+        return J({ ok:'syncing', progress:syncState.progress, message:syncState.message });
       }
 
-      // Lines
-      let lines = [];
-      try {
-        const raw = await lsFetchAll('SaleLine', {
-          load_relations: JSON.stringify(['Item']),
-          'timeStamp][>=': `${from} 00:00:00`,
-          'timeStamp][<=': `${to} 23:59:59`,
-        });
-        lines = normalizeLines(raw);
-        console.log(`[sync] Lines: ${lines.length}`);
-      } catch(e) {
-        console.error('[sync] Lines error:', e.message);
-        errors.push({ source:'lines', error:e.message });
+      // Start background sync and return immediately
+      console.log(`[sync] Iniciando background sync ${from} → ${to}`);
+      runSyncBackground(from, to); // fire and forget
+      return J({ ok:'syncing', progress:0, message:'Iniciando sync...' });
+    }
+
+    // SYNC STATUS — polling endpoint
+    if (pathname === '/api/sync/status') {
+      const { from, to } = query;
+      const ck = from && to ? `${from}_${to}` : syncState.key;
+
+      // Check cache
+      if (ck) {
+        const cached = getCached(ck, 15*60*1000);
+        if (cached) return J(cached); // done, return full data
       }
 
-      // Inventario
-      let inventory = [];
-      try {
-        const raw = await lsFetchAll('Item', {
-          load_relations: JSON.stringify(['Category', 'Manufacturer', 'ItemShops']),
-          archived: 'false',
-        });
-        inventory = normalizeInventory(raw);
-        console.log(`[sync] Inventory: ${inventory.length}`);
-      } catch(e) {
-        console.error('[sync] Inventory error:', e.message);
-        errors.push({ source:'inventory', error:e.message });
-      }
-
-      const result = { ok:true, ts:new Date().toISOString(), from, to,
-        counts:{ transactions:transactions.length, lines:lines.length, inventory:inventory.length },
-        transactions, lines, inventory,
-        errors: errors.length ? errors : undefined };
-
-      if (!errors.length) setCache(ck, result);
-      return J(result);
+      // Return current state
+      if (syncState.error) return J({ ok:false, error:syncState.error });
+      if (syncState.result) return J(syncState.result); // completed
+      return J({ ok:'syncing', progress:syncState.progress, message:syncState.message, running:syncState.running });
     }
 
     // SHOPIFY PRODUCTS
