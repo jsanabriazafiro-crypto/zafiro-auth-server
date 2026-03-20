@@ -15,6 +15,28 @@ const QB_CLIENT_SECRET = process.env.QB_CLIENT_SECRET || '';
 
 const LS_CLIENT_ID     = process.env.LS_CLIENT_ID     || '';
 const LS_CLIENT_SECRET = process.env.LS_CLIENT_SECRET || '';
+const SHOPIFY_TOKEN    = process.env.SHOPIFY_TOKEN    || '';
+
+// ── Helper: GET from Shopify API ──────────────────────────────────────────────
+function shopifyGet(endpoint) {
+  return new Promise((resolve, reject) => {
+    const token = SHOPIFY_TOKEN;
+    const shop  = SHOPIFY_SHOP;
+    if (!token || !shop) { reject(new Error('Token o shop no configurado')); return; }
+    const req = https.request({
+      hostname: shop,
+      path: `/admin/api/2026-01${endpoint}`,
+      method: 'GET',
+      headers: { 'X-Shopify-Access-Token': token, 'Content-Type': 'application/json' }
+    }, res => {
+      let d = '';
+      res.on('data', c => d += c);
+      res.on('end', () => { try { resolve(JSON.parse(d)); } catch(e) { resolve({raw: d}); } });
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
 
 // ── Helper: POST request ─────────────────────────────────────────────────────
 function postJSON(hostname, path, body, headers={}) {
@@ -218,6 +240,118 @@ const server = http.createServer(async (req, res) => {
       <div class="info">Guarda este código para intercambiarlo por el Access Token.</div>
       <a href="/" class="btn outline">← Volver</a>
     `));
+    return;
+  }
+
+  // ── SHOPIFY PROXY ─────────────────────────────────────────────────────────
+  // GET /api/shopify/products → jala todos los productos con fotos
+  if (path === '/api/shopify/products') {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Content-Type', 'application/json');
+    try {
+      let allProducts = [];
+      let pageInfo = null;
+      let hasMore = true;
+      while (hasMore) {
+        let endpoint = '/products.json?limit=250&fields=id,title,handle,variants,images,image';
+        if (pageInfo) endpoint += `&page_info=${pageInfo}`;
+        const data = await shopifyGet(endpoint);
+        if (data.products) {
+          allProducts = allProducts.concat(data.products);
+          // Check for next page via Link header (simplified - get all at once)
+          hasMore = false; // Shopify returns max 250, paginate if needed
+        } else {
+          hasMore = false;
+        }
+      }
+      res.end(JSON.stringify({ success: true, products: allProducts, count: allProducts.length }));
+    } catch(err) {
+      res.end(JSON.stringify({ success: false, error: err.message }));
+    }
+    return;
+  }
+
+  // GET /api/shopify/products/all → paginated, gets ALL products
+  if (path === '/api/shopify/products/all') {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Content-Type', 'application/json');
+    try {
+      // First get count
+      const countData = await shopifyGet('/products/count.json');
+      const total = countData.count || 0;
+      let allProducts = [];
+      let sinceId = 0;
+      while (allProducts.length < total) {
+        let endpoint = `/products.json?limit=250&fields=id,title,handle,variants,images,image&since_id=${sinceId}`;
+        const data = await shopifyGet(endpoint);
+        if (!data.products || data.products.length === 0) break;
+        allProducts = allProducts.concat(data.products);
+        sinceId = data.products[data.products.length - 1].id;
+        if (data.products.length < 250) break;
+      }
+      // Build photo map: SKU → image URL
+      const photoMap = {};
+      allProducts.forEach(p => {
+        const mainImg = p.image ? p.image.src : (p.images && p.images[0] ? p.images[0].src : null);
+        if (p.variants) {
+          p.variants.forEach(v => {
+            if (v.sku) {
+              // Find variant image if exists
+              const varImg = v.image_id && p.images
+                ? (p.images.find(i => i.id === v.image_id) || {}).src
+                : null;
+              photoMap[v.sku] = varImg || mainImg;
+            }
+          });
+        }
+        // Also index by product ID
+        if (mainImg) photoMap[String(p.id)] = mainImg;
+      });
+      res.end(JSON.stringify({ 
+        success: true, 
+        count: allProducts.length,
+        total,
+        photoMap 
+      }));
+    } catch(err) {
+      res.end(JSON.stringify({ success: false, error: err.message }));
+    }
+    return;
+  }
+
+  // GET /api/shopify/orders → recent orders
+  if (path === '/api/shopify/orders') {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Content-Type', 'application/json');
+    try {
+      const data = await shopifyGet('/orders.json?limit=250&status=any&fields=id,name,created_at,total_price,line_items,financial_status,fulfillment_status');
+      res.end(JSON.stringify({ success: true, orders: data.orders || [], count: (data.orders||[]).length }));
+    } catch(err) {
+      res.end(JSON.stringify({ success: false, error: err.message }));
+    }
+    return;
+  }
+
+  // GET /api/shopify/inventory → inventory levels
+  if (path === '/api/shopify/inventory') {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Content-Type', 'application/json');
+    try {
+      const data = await shopifyGet('/inventory_levels.json?limit=250');
+      res.end(JSON.stringify({ success: true, inventory: data.inventory_levels || [] }));
+    } catch(err) {
+      res.end(JSON.stringify({ success: false, error: err.message }));
+    }
+    return;
+  }
+
+  // OPTIONS preflight
+  if (req.method === 'OPTIONS') {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    res.writeHead(204);
+    res.end();
     return;
   }
 
