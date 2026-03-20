@@ -317,7 +317,7 @@ async function runSyncBackground(from, to) {
     try {
       const raw = await lsFetchAll('Sale', {
         load_relations: JSON.stringify(['Customer']),
-        timeStamp: `>,${from} 00:00:00,<,${to} 23:59:59`,
+        timeStamp: `><,${from}T00:00:00-04:00,${to}T23:59:59-04:00`,
         completed: 'true',
       }, (n, total) => {
         syncState.message = `Transacciones: ${n}${total ? '/'+total : ''}...`;
@@ -337,8 +337,7 @@ async function runSyncBackground(from, to) {
     try {
       const raw = await lsFetchAll('SaleLine', {
         load_relations: JSON.stringify(['Item']),
-        'timeStamp][>=': `${from} 00:00:00`,
-        'timeStamp][<=': `${to} 23:59:59`,
+        timeStamp: `><,${from}T00:00:00-04:00,${to}T23:59:59-04:00`,
       }, (n, total) => {
         syncState.message = `Lines: ${n}${total ? '/'+total : ''}...`;
         syncState.progress = Math.min(45 + Math.round(n / (total||80000) * 20), 65);
