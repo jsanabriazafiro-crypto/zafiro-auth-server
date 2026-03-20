@@ -1,0 +1,12 @@
+{
+  "name": "zafiro-auth-server",
+  "version": "1.0.0",
+  "description": "OAuth server for Zafiro Retail OS",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
