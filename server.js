@@ -270,7 +270,7 @@ const server = http.createServer(async (req, res) => {
     const lsParams = new URLSearchParams({
       response_type: 'code',
       client_id: LS_CLIENT_ID,
-      scope: 'employee:inventory_read employee:sales_read employee:shipments_read employee:orders_read employee:register_read employee:reports_read',
+      scope: 'employee:register employee:inventory employee:reports',
       redirect_uri: BASE + '/lightspeed/callback'
     });
     const authUrl = 'https://cloud.lightspeedapp.com/auth/oauth/authorize?' + lsParams.toString();
