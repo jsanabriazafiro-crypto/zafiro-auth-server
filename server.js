@@ -59,7 +59,7 @@ function httpPost(hostname, path, body, headers = {}) {
 }
 
 // ── Lightspeed: obtener/renovar access token ──────────────────────
-// FIX: endpoint correcto para R-Series es /auth/oauth/access_token
+// FIX: endpoint correcto para R-Series es /auth/oauth/token
 async function getLSToken() {
   if (lsAccessToken && Date.now() < lsTokenExpiry - 60000) return lsAccessToken;
 
@@ -73,7 +73,7 @@ async function getLSToken() {
 
   const r = await httpPost(
     'cloud.lightspeedapp.com',
-    '/auth/oauth/access_token',          // ← CORRECTO para R-Series
+    '/auth/oauth/token',          // ← CORRECTO para R-Series
     params.toString(),
     { 'Content-Type': 'application/x-www-form-urlencoded' }
   );
@@ -302,7 +302,7 @@ http.createServer(async (req, res) => {
     }
 
     // LIGHTSPEED OAUTH CALLBACK
-    // FIX: endpoint correcto /auth/oauth/access_token
+    // FIX: endpoint correcto /auth/oauth/token
     if (pathname === '/lightspeed/callback') {
       const { code, error } = query;
       if (error || !code) return HTML_OUT(`<h2>Error: ${error || 'No code'}</h2>`);
@@ -316,7 +316,7 @@ http.createServer(async (req, res) => {
 
       const r = await httpPost(
         'cloud.lightspeedapp.com',
-        '/auth/oauth/access_token',     // ← CORRECTO
+        '/auth/oauth/token',     // ← CORRECTO
         p.toString(),
         { 'Content-Type': 'application/x-www-form-urlencoded' }
       );
