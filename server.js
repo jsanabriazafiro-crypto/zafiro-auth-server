@@ -85,9 +85,8 @@ async function updateRefreshTokenInRender(newToken) {
     return;
   }
   try {
-    const body = JSON.stringify({
-      envVars: [{ key: 'LS_REFRESH_TOKEN', value: newToken }]
-    });
+    // Render API v1 PUT /env-vars expects array format
+    const body = JSON.stringify([{ key: 'LS_REFRESH_TOKEN', value: newToken }]);
     const buf = Buffer.from(body);
     await new Promise((resolve, reject) => {
       const req = https.request({
