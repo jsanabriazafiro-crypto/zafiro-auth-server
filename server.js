@@ -89,7 +89,7 @@ async function getLSToken() {
 
   const r = await httpPost(
     'cloud.lightspeedapp.com',
-'/auth/oauth/access_token',
+'/auth/oauth/access_token'
     params.toString(),
     { 'Content-Type': 'application/x-www-form-urlencoded' }
   );
