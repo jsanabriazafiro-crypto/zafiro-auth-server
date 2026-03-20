@@ -87,7 +87,7 @@ function lightspeedTokenPost(body) {
     const auth = Buffer.from(`${LS_CLIENT_ID}:${LS_CLIENT_SECRET}`).toString('base64');
     const req = https.request({
       hostname: 'cloud.lightspeedapp.com',
-      path: '/oauth/access_token.php',
+      path: '/auth/oauth/access_token',
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
@@ -272,7 +272,7 @@ const server = http.createServer(async (req, res) => {
       scope: 'employee:inventory_read employee:sales_read employee:shipments_read employee:orders_read employee:register_read employee:reports_read',
       redirect_uri: BASE + '/lightspeed/callback'
     });
-    const authUrl = 'https://cloud.lightspeedapp.com/oauth/authorize.php?' + lsParams.toString();
+    const authUrl = 'https://cloud.lightspeedapp.com/auth/oauth/authorize?' + lsParams.toString();
     res.writeHead(302, { Location: authUrl });
     res.end();
     return;
