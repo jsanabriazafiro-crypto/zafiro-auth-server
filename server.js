@@ -15,6 +15,9 @@ const QB_CLIENT_SECRET = process.env.QB_CLIENT_SECRET || '';
 
 const LS_CLIENT_ID     = process.env.LS_CLIENT_ID     || '';
 const LS_CLIENT_SECRET = process.env.LS_CLIENT_SECRET || '';
+const LS_ACCOUNT_ID    = process.env.LS_ACCOUNT_ID    || '';
+const LS_TOKEN         = process.env.LS_TOKEN         || '';
+const LS_REFRESH_TOKEN = process.env.LS_REFRESH_TOKEN || '';
 const SHOPIFY_TOKEN    = process.env.SHOPIFY_TOKEN    || '';
 
 // ── Helper: GET from Shopify API ──────────────────────────────────────────────
@@ -52,6 +55,52 @@ function postJSON(hostname, path, body, headers={}) {
     });
     req.on('error', reject);
     req.write(data);
+    req.end();
+  });
+}
+
+// ── Helper: GET from Lightspeed API ──────────────────────────────────────────
+function lightspeedGet(endpoint) {
+  return new Promise((resolve, reject) => {
+    const token = LS_TOKEN;
+    const accountId = LS_ACCOUNT_ID;
+    if (!token) { reject(new Error('Token de Lightspeed no configurado')); return; }
+    const req = https.request({
+      hostname: 'api.lightspeedapp.com',
+      path: `/API/V3/Account/${accountId}${endpoint}`,
+      method: 'GET',
+      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }
+    }, res => {
+      let d = '';
+      res.on('data', c => d += c);
+      res.on('end', () => { try { resolve(JSON.parse(d)); } catch(e) { resolve({raw: d}); } });
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+// ── Helper: POST to Lightspeed OAuth ─────────────────────────────────────────
+function lightspeedTokenPost(body) {
+  return new Promise((resolve, reject) => {
+    const params = new URLSearchParams(body).toString();
+    const auth = Buffer.from(`${LS_CLIENT_ID}:${LS_CLIENT_SECRET}`).toString('base64');
+    const req = https.request({
+      hostname: 'cloud.lightspeedapp.com',
+      path: '/oauth/access_token.php',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Authorization': `Basic ${auth}`,
+        'Content-Length': Buffer.byteLength(params)
+      }
+    }, res => {
+      let d = '';
+      res.on('data', c => d += c);
+      res.on('end', () => { try { resolve(JSON.parse(d)); } catch(e) { resolve({raw: d}); } });
+    });
+    req.on('error', reject);
+    req.write(params);
     req.end();
   });
 }
@@ -211,16 +260,17 @@ const server = http.createServer(async (req, res) => {
     if (!LS_CLIENT_ID) {
       res.end(page('Lightspeed', `
         <h1>Lightspeed</h1>
-        <div class="info">Aún no tienes las credenciales de Lightspeed.<br>Cuando Lightspeed te apruebe, agrega:<br><strong>LS_CLIENT_ID</strong> y <strong>LS_CLIENT_SECRET</strong> en Render.</div>
+        <div class="info">Configura <strong>LS_CLIENT_ID</strong> y <strong>LS_CLIENT_SECRET</strong> en Render.</div>
         <a href="/" class="btn outline">← Volver</a>
       `));
       return;
     }
     const BASE = process.env.BASE_URL || `http://localhost:${PORT}`;
+    const LS_SCOPES = 'employee:all';
     const authUrl = `https://cloud.lightspeedapp.com/oauth/authorize.php`
       + `?response_type=code`
       + `&client_id=${LS_CLIENT_ID}`
-      + `&scope=employee:inventory_read+employee:sales_read+employee:orders_read`
+      + `&scope=${encodeURIComponent(LS_SCOPES)}`
       + `&redirect_uri=${encodeURIComponent(BASE + '/lightspeed/callback')}`;
     res.writeHead(302, { Location: authUrl });
     res.end();
@@ -231,15 +281,42 @@ const server = http.createServer(async (req, res) => {
   if (path === '/lightspeed/callback') {
     const code = query.code;
     if (!code) {
-      res.end(page('Error LS', `<div class="error">No se recibió el código.</div>`));
+      res.end(page('Error LS', `<div class="error">No se recibió el código de autorización.</div><a href="/lightspeed/start" class="btn">Intentar de nuevo</a>`));
       return;
     }
-    res.end(page('✅ Lightspeed', `
-      <div class="success">🎉 Código de Lightspeed recibido</div>
-      <p style="font-size:13px;color:#4a4540">Código: <code>${code}</code></p>
-      <div class="info">Guarda este código para intercambiarlo por el Access Token.</div>
-      <a href="/" class="btn outline">← Volver</a>
-    `));
+    try {
+      const BASE = process.env.BASE_URL || `http://localhost:${PORT}`;
+      const data = await lightspeedTokenPost({
+        grant_type: 'authorization_code',
+        code,
+        redirect_uri: BASE + '/lightspeed/callback'
+      });
+      if (data.access_token) {
+        res.end(page('✅ Lightspeed Conectado', `
+          <div class="success">🎉 ¡Token de Lightspeed obtenido exitosamente!</div>
+          <p style="font-size:13px;color:#4a4540;margin-bottom:8px"><strong>Access Token:</strong></p>
+          <div class="token-box">
+            <button class="copy-btn" onclick="copyText('${data.access_token}')">Copiar</button>
+            ${data.access_token}
+          </div>
+          ${data.refresh_token ? `
+          <p style="font-size:13px;color:#4a4540;margin:12px 0 8px"><strong>Refresh Token (guárdalo también):</strong></p>
+          <div class="token-box">
+            <button class="copy-btn" onclick="copyText('${data.refresh_token}')">Copiar</button>
+            ${data.refresh_token}
+          </div>` : ''}
+          <div class="info">⚠️ Guarda ambos tokens. El Access Token expira en 1 hora — el Refresh Token se usa para renovarlo automáticamente.</div>
+          <p style="font-size:12px;color:#4a4540;margin-top:12px">Añade en Render:<br>
+          <strong>LS_TOKEN</strong> = Access Token<br>
+          <strong>LS_REFRESH_TOKEN</strong> = Refresh Token</p>
+          <a href="/" class="btn outline" style="margin-top:16px">← Volver al inicio</a>
+        `));
+      } else {
+        res.end(page('Error LS', `<div class="error">Error: ${JSON.stringify(data)}</div><a href="/lightspeed/start" class="btn">Intentar de nuevo</a>`));
+      }
+    } catch(err) {
+      res.end(page('Error LS', `<div class="error">Error: ${err.message}</div>`));
+    }
     return;
   }
 
@@ -332,6 +409,19 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /api/shopify/disputes → payment disputes
+  if (path === '/api/shopify/disputes') {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Content-Type', 'application/json');
+    try {
+      const data = await shopifyGet('/shopify_payments/disputes.json?limit=50');
+      res.end(JSON.stringify({ success: true, disputes: data.disputes || [] }));
+    } catch(err) {
+      res.end(JSON.stringify({ success: false, disputes: [], error: err.message }));
+    }
+    return;
+  }
+
   // GET /api/shopify/inventory → inventory levels
   if (path === '/api/shopify/inventory') {
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -339,6 +429,34 @@ const server = http.createServer(async (req, res) => {
     try {
       const data = await shopifyGet('/inventory_levels.json?limit=250');
       res.end(JSON.stringify({ success: true, inventory: data.inventory_levels || [] }));
+    } catch(err) {
+      res.end(JSON.stringify({ success: false, error: err.message }));
+    }
+    return;
+  }
+
+  // ── LIGHTSPEED PROXY ──────────────────────────────────────────────────────
+  if (path === '/api/lightspeed/sales') {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Content-Type', 'application/json');
+    const days = parseInt(query.days||'30');
+    const from = new Date(); from.setDate(from.getDate()-days);
+    const fromStr = from.toISOString().split('T')[0]+'T00:00:00-04:00';
+    try {
+      const data = await lightspeedGet(`/Sale.json?timeStamp=%3E%3D${encodeURIComponent(fromStr)}&limit=100&load_relations=["SaleLines"]`);
+      res.end(JSON.stringify({ success: true, sales: data.Sale || [] }));
+    } catch(err) {
+      res.end(JSON.stringify({ success: false, error: err.message }));
+    }
+    return;
+  }
+
+  if (path === '/api/lightspeed/inventory') {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Content-Type', 'application/json');
+    try {
+      const data = await lightspeedGet('/Item.json?limit=250&load_relations=["ItemShops"]');
+      res.end(JSON.stringify({ success: true, items: data.Item || [] }));
     } catch(err) {
       res.end(JSON.stringify({ success: false, error: err.message }));
     }
