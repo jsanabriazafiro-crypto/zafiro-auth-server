@@ -89,7 +89,7 @@ function lightspeedTokenPost(body) {
     const auth = Buffer.from(`${LS_CLIENT_ID}:${LS_CLIENT_SECRET}`).toString('base64');
     const req = https.request({
       hostname: 'cloud.lightspeedapp.com',
-      path: '/oauth/access_token.php',
+      path: '/auth/oauth/token',
       method: 'POST',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
