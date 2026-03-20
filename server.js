@@ -266,11 +266,11 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     const BASE = process.env.BASE_URL || `http://localhost:${PORT}`;
-    const LS_SCOPES = 'employee:inventory_read employee:sales_read employee:shipments_read employee:orders_read employee:register_read employee:reports_read';
+    const LS_SCOPES = 'employee:inventory_read+employee:sales_read+employee:shipments_read+employee:orders_read+employee:register_read+employee:reports_read';
     const authUrl = `https://cloud.lightspeedapp.com/oauth/authorize.php`
       + `?response_type=code`
       + `&client_id=${LS_CLIENT_ID}`
-      + `&scope=${encodeURIComponent(LS_SCOPES)}`
+      + `&scope=${LS_SCOPES}`
       + `&redirect_uri=${encodeURIComponent(BASE + '/lightspeed/callback')}`;
     res.writeHead(302, { Location: authUrl });
     res.end();
