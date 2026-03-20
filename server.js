@@ -17,6 +17,51 @@ const SHOPIFY_TOKEN    = process.env.SHOPIFY_TOKEN || '';
 let lsAccessToken = '';
 let lsTokenExpiry = 0;
 
+// ── Auto-update LS_REFRESH_TOKEN en Render cuando rota ────────────
+const RENDER_API_KEY    = process.env.RENDER_API_KEY    || '';
+const RENDER_SERVICE_ID = process.env.RENDER_SERVICE_ID || '';
+
+async function updateRefreshTokenInRender(newToken) {
+  if (!RENDER_API_KEY || !RENDER_SERVICE_ID) {
+    console.log('[Render] Sin API key/service ID — no se puede auto-actualizar el token');
+    return;
+  }
+  try {
+    const body = JSON.stringify({
+      envVars: [{ key: 'LS_REFRESH_TOKEN', value: newToken }]
+    });
+    const buf = Buffer.from(body);
+    await new Promise((resolve, reject) => {
+      const req = https.request({
+        hostname: 'api.render.com',
+        path: `/v1/services/${RENDER_SERVICE_ID}/env-vars`,
+        method: 'PUT',
+        headers: {
+          'Authorization': `Bearer ${RENDER_API_KEY}`,
+          'Content-Type': 'application/json',
+          'Content-Length': buf.length,
+        }
+      }, res => {
+        let d = '';
+        res.on('data', c => d += c);
+        res.on('end', () => {
+          if (res.statusCode === 200 || res.statusCode === 204) {
+            console.log('[Render] ✅ LS_REFRESH_TOKEN actualizado en Render env vars');
+          } else {
+            console.log('[Render] ⚠️ Update respondió', res.statusCode, d.slice(0,200));
+          }
+          resolve();
+        });
+      });
+      req.on('error', e => { console.error('[Render] Error:', e.message); resolve(); });
+      req.write(body);
+      req.end();
+    });
+  } catch(e) {
+    console.error('[Render] Error actualizando token:', e.message);
+  }
+}
+
 // ── HTTP helpers ──────────────────────────────────────────────────
 function httpGet(hostname, path, headers = {}) {
   return new Promise((resolve, reject) => {
@@ -55,7 +100,11 @@ async function getLSToken() {
   if (!j.access_token) throw new Error('Token refresh failed: ' + r.body);
   lsAccessToken = j.access_token;
   lsTokenExpiry = Date.now() + (j.expires_in || 3600) * 1000;
-  if (j.refresh_token) LS_REFRESH_TOKEN = j.refresh_token;
+  if (j.refresh_token && j.refresh_token !== LS_REFRESH_TOKEN) {
+    LS_REFRESH_TOKEN = j.refresh_token;
+    // Guardar nuevo token en Render para que persista después de reinicios
+    updateRefreshTokenInRender(j.refresh_token);
+  }
   console.log('[LS] Token OK, expira en', j.expires_in, 's');
   return lsAccessToken;
 }
@@ -392,7 +441,10 @@ http.createServer(async (req, res) => {
       if (!d.access_token) return H(`<h2>Error: ${r.body}</h2>`);
       lsAccessToken = d.access_token;
       lsTokenExpiry = Date.now() + (d.expires_in||3600)*1000;
-      if (d.refresh_token) LS_REFRESH_TOKEN = d.refresh_token;
+      if (d.refresh_token) {
+        LS_REFRESH_TOKEN = d.refresh_token;
+        updateRefreshTokenInRender(d.refresh_token);
+      }
       return H(`<!DOCTYPE html><html><head><meta charset="UTF-8"/><style>
 body{font-family:monospace;background:#0d0d1a;color:#F2EDE6;padding:40px;}
 .t{background:#1a1a2e;padding:16px;border-radius:8px;word-break:break-all;border:1px solid rgba(201,169,110,.3);color:#C9A96E;margin:8px 0;}
