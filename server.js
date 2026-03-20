@@ -14,12 +14,70 @@ let   LS_REFRESH_TOKEN = process.env.LS_REFRESH_TOKEN || '';
 const SHOPIFY_SHOP     = process.env.SHOPIFY_SHOP || 'zafiro-clothing.myshopify.com';
 const SHOPIFY_TOKEN    = process.env.SHOPIFY_TOKEN || '';
 
+// ── Supabase helpers ─────────────────────────────────────────────
+async function sbUpsert(table, rows) {
+  if (!SUPABASE_URL || !SUPABASE_KEY || !rows.length) return;
+  const chunkSize = 500;
+  for (let i = 0; i < rows.length; i += chunkSize) {
+    const chunk = rows.slice(i, i + chunkSize);
+    const body  = JSON.stringify(chunk);
+    const buf   = Buffer.from(body);
+    await new Promise((resolve) => {
+      const u = new URL(`${SUPABASE_URL}/rest/v1/${table}`);
+      const req = https.request({
+        hostname: u.hostname, path: u.pathname + '?on_conflict=id', method: 'POST',
+        headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`,
+          'Content-Type': 'application/json', 'Prefer': 'resolution=merge-duplicates',
+          'Content-Length': buf.length }
+      }, res => {
+        let d = ''; res.on('data', c => d += c);
+        res.on('end', () => {
+          if (res.statusCode >= 400) console.error(`[SB] ${table} error ${res.statusCode}: ${d.slice(0,150)}`);
+          else console.log(`[SB] ${table}: saved ${i+chunk.length}/${rows.length}`);
+          resolve();
+        });
+      });
+      req.on('error', e => { console.error('[SB]', e.message); resolve(); });
+      req.write(body); req.end();
+    });
+  }
+}
+
+async function sbSelect(table) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return [];
+  return new Promise((resolve) => {
+    const u = new URL(`${SUPABASE_URL}/rest/v1/${table}?select=*`);
+    const req = https.request({
+      hostname: u.hostname, path: u.pathname + u.search, method: 'GET',
+      headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Accept': 'application/json', 'Range': '0-999999' }
+    }, res => {
+      let d = ''; res.on('data', c => d += c);
+      res.on('end', () => { try { resolve(JSON.parse(d)); } catch(e) { resolve([]); } });
+    });
+    req.on('error', () => resolve([])); req.end();
+  });
+}
+
+async function sbGetLastSync() {
+  const rows = await sbSelect('sync_meta');
+  return rows?.find(r => r.key === 'last_sync')?.value || null;
+}
+
+async function sbSetLastSync(ts) {
+  await sbUpsert('sync_meta', [{ id: 'last_sync', key: 'last_sync', value: ts }]);
+}
+
 let lsAccessToken = '';
 let lsTokenExpiry = 0;
 
 // ── Auto-update LS_REFRESH_TOKEN en Render cuando rota ────────────
 const RENDER_API_KEY    = process.env.RENDER_API_KEY    || '';
 const RENDER_SERVICE_ID = process.env.RENDER_SERVICE_ID || '';
+
+// ── Supabase config ───────────────────────────────────────────────
+const SUPABASE_URL = process.env.SUPABASE_URL || '';
+const SUPABASE_KEY = process.env.SUPABASE_KEY || ''; // service_role key
 
 async function updateRefreshTokenInRender(newToken) {
   if (!RENDER_API_KEY || !RENDER_SERVICE_ID) {
@@ -134,6 +192,28 @@ async function lsFetchAll(endpoint, params = {}, onProgress = null) {
     });
 
     if (r.status === 429) { console.log('[LS] Rate limited, esperando...'); await sleep(1500); continue; }
+    if (r.status === 401) {
+      // Token expirado mid-sync — renovar y reintentar esta página
+      console.log('[LS] Token expirado mid-sync, renovando...');
+      lsAccessToken = ''; // forzar renovación
+      const newToken = await getLSToken();
+      const r2 = await httpGet('api.lightspeedapp.com', path, {
+        Authorization: `Bearer ${newToken}`, Accept: 'application/json',
+      });
+      if (r2.status !== 200) throw new Error(`LS ${endpoint} HTTP ${r2.status} after token refresh`);
+      const json2  = JSON.parse(r2.body);
+      const attrs2 = json2['@attributes'] || {};
+      const raw2   = json2[endpoint];
+      if (!raw2) break;
+      const arr2 = Array.isArray(raw2) ? raw2 : [raw2];
+      all.push(...arr2);
+      pageCount++;
+      if (attrs2.next) {
+        try { const u = new URL(attrs2.next.startsWith('http') ? attrs2.next : 'https://api.lightspeedapp.com' + attrs2.next); afterCursor = u.searchParams.get('after'); } catch(e) { afterCursor = null; }
+      } else { afterCursor = null; }
+      if (!afterCursor || arr2.length < 100) break;
+      continue;
+    }
     if (r.status !== 200) throw new Error(`LS ${endpoint} HTTP ${r.status}: ${r.body.slice(0, 300)}`);
 
     const json  = JSON.parse(r.body);
@@ -349,23 +429,53 @@ async function runSyncBackground(from, to) {
       errors.push({ source:'lines', error:e.message });
     }
 
-    // Inventario
-    syncState.message = 'Descargando inventario...';
+    // Inventario — cache 24h para no re-descargar en cada sync
+    syncState.message = 'Verificando inventario...';
     syncState.progress = 70;
     let inventory = [];
-    try {
-      const raw = await lsFetchAll('Item', {
-        load_relations: JSON.stringify(['Category', 'Manufacturer', 'ItemShops']),
-        archived: 'false',
-      }, (n, total) => {
-        syncState.message = `Inventario: ${n}${total ? '/'+total : ''}...`;
-        syncState.progress = Math.min(70 + Math.round(n / (total||45000) * 25), 95);
-      });
-      inventory = normalizeInventory(raw);
-      console.log(`[sync] Inventory: ${inventory.length}`);
-    } catch(e) {
-      console.error('[sync] Inventory error:', e.message);
-      errors.push({ source:'inventory', error:e.message });
+    const cachedInv = getCached('inventory_24h', 24*60*60*1000);
+    if (cachedInv) {
+      inventory = cachedInv;
+      console.log(`[sync] Inventory from 24h cache: ${inventory.length} items`);
+      syncState.message = `Inventario desde cache (${inventory.length} items)`;
+      syncState.progress = 95;
+    } else {
+      try {
+        const raw = await lsFetchAll('Item', {
+          load_relations: JSON.stringify(['Category', 'Manufacturer', 'ItemShops']),
+          archived: 'false',
+        }, (n, total) => {
+          syncState.message = `Inventario: ${n}${total ? '/'+total : ''}...`;
+          syncState.progress = Math.min(70 + Math.round(n / (total||45000) * 25), 95);
+        });
+        inventory = normalizeInventory(raw);
+        setCache('inventory_24h', inventory);
+        console.log(`[sync] Inventory: ${inventory.length}`);
+      } catch(e) {
+        console.error('[sync] Inventory error:', e.message);
+        errors.push({ source:'inventory', error:e.message });
+      }
+    }
+
+    // Save to Supabase for persistence
+    if (!errors.length && SUPABASE_URL) {
+      syncState.message = 'Guardando en base de datos...';
+      syncState.progress = 97;
+      try {
+        // Transform for Supabase (need 'id' field for upsert)
+        const txRows  = transactions.map(t => ({ id: t.ID, ...t }));
+        const slRows  = lines.map((l, i) => ({ id: `${l.ID}_${i}`, ...l }));
+        const invRows = inventory.map(item => ({ id: item['System ID'], ...item }));
+        await Promise.all([
+          sbUpsert('transactions', txRows),
+          sbUpsert('lines', slRows),
+          sbUpsert('inventory', invRows),
+        ]);
+        await sbSetLastSync(new Date().toISOString());
+        console.log('[Supabase] All data saved');
+      } catch(e) {
+        console.error('[Supabase] Save error:', e.message);
+      }
     }
 
     const result = { ok:true, ts:new Date().toISOString(), from, to,
@@ -417,10 +527,35 @@ http.createServer(async (req, res) => {
 
     // HEALTH
     if (pathname === '/api/health') {
-      return J({ status:'ok', version:'2.2',
+      const lastSync = await sbGetLastSync().catch(() => null);
+      return J({ status:'ok', version:'2.3',
         lightspeed: LS_CLIENT_ID && LS_REFRESH_TOKEN ? 'configured' : 'missing credentials',
         shopify: SHOPIFY_TOKEN ? 'configured' : 'missing token',
-        account_id: LS_ACCOUNT_ID, server_time: new Date().toISOString() });
+        supabase: SUPABASE_URL ? 'configured' : 'not configured',
+        account_id: LS_ACCOUNT_ID,
+        last_sync: lastSync,
+        server_time: new Date().toISOString() });
+    }
+
+    // LOAD FROM SUPABASE — serve persisted data without hitting Lightspeed
+    if (pathname === '/api/data') {
+      if (!SUPABASE_URL) return J({ ok:false, error:'Supabase not configured' }, 503);
+      try {
+        console.log('[Supabase] Loading persisted data...');
+        const [transactions, lines, inventory] = await Promise.all([
+          sbSelect('transactions'),
+          sbSelect('lines'),
+          sbSelect('inventory'),
+        ]);
+        const lastSync = await sbGetLastSync();
+        console.log(`[Supabase] Loaded: ${transactions.length} tx, ${lines.length} lines, ${inventory.length} items`);
+        return J({ ok:true, ts:lastSync||new Date().toISOString(),
+          from:'2025-01-01', to:new Date().toISOString().slice(0,10),
+          counts:{ transactions:transactions.length, lines:lines.length, inventory:inventory.length },
+          transactions, lines, inventory });
+      } catch(e) {
+        return J({ ok:false, error:e.message }, 500);
+      }
     }
 
     // LIGHTSPEED OAUTH
