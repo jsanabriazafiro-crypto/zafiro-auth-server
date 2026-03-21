@@ -326,6 +326,7 @@ function normalizeInventory(items) {
   return items.map(item => {
     const row = {
       'System ID':   String(item.itemID || ''),
+      'system_id':   String(item.itemID || ''),
       'Item':        item.description || '',
       'Brand':       item.Manufacturer?.name || '',
       'Category':    item.Category?.name || '',
@@ -459,7 +460,7 @@ async function runSyncBackground(from, to) {
         console.log(`[sync] Inventory: ${inventory.length}`);
         if (inventory.length && SUPABASE_URL) {
           syncState.message = 'Guardando inventario en Supabase...';
-          await sbUpsert('inventory', inventory.map(item => ({ id: item['System ID'], ...item })));
+          await sbUpsert('inventory', inventory.map(item => ({ id: item['system_id'] || item['System ID'], ...item })));
           inventory = []; // free memory
           await sbSetLastSync(new Date().toISOString());
           inventory = []; // free memory
