@@ -543,7 +543,7 @@ body{font-family:monospace;background:#0d0d1a;color:#F2EDE6;padding:40px;}
       const itemId = query.id || '210000058004';
       try {
         const token = await getLSToken();
-        const path = `/API/V3/Account/${LS_ACCOUNT_ID}/Item/${itemId}.json?load_relations=["ItemShops","Category","Manufacturer","Prices"]`;
+        const path = `/API/V3/Account/${LS_ACCOUNT_ID}/Item/${itemId}.json?load_relations=["ItemShops","Category","Manufacturer"]`;
         const r = await httpGet('api.lightspeedapp.com', path, {
           Authorization: `Bearer ${token}`, Accept: 'application/json',
         });
