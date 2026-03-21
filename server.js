@@ -391,31 +391,48 @@ async function runSyncBackground(from, to) {
       }
     } catch(e) { console.error('[sync] Lines error:', e.message); errors.push({ source:'lines', error:e.message }); }
 
-    // Inventario (cache 24h)
-    syncState.message = 'Verificando inventario...'; syncState.progress = 70;
+    // Inventario — sync incremental usando timeStamp de Lightspeed
+    // Solo baja items modificados desde el último sync → rápido en syncs diarios
+    syncState.message = 'Verificando cambios de inventario...'; syncState.progress = 70;
     let inventory = [];
-    const cachedInv = getCached('inventory_24h', 24*60*60*1000);
-    if (cachedInv) {
-      inventory = cachedInv;
-      console.log(`[sync] Inventory from cache: ${inventory.length} items`);
-    } else {
-      try {
-        const raw = await lsFetchAll('Item', {
-          load_relations: JSON.stringify(['Category', 'Manufacturer', 'ItemShops']),
-          archived: 'false',
-        }, (n, total) => {
-          syncState.message = `Inventario: ${n}${total?'/'+total:''}...`;
-          syncState.progress = Math.min(70 + Math.round(n/(total||45000)*25), 95);
-        });
+    try {
+      const lastSync = await sbGetLastSync().catch(() => null);
+      const invParams = {
+        load_relations: JSON.stringify(['Category', 'Manufacturer', 'ItemShops']),
+        archived: 'false',
+      };
+
+      if (lastSync) {
+        // Only items modified since last sync
+        const sinceDate = new Date(lastSync).toISOString().replace('T',' ').slice(0,19);
+        invParams['timeStamp][>='] = sinceDate;
+        syncState.message = `Inventario: cambios desde ${sinceDate.slice(0,10)}...`;
+        console.log(`[sync] Inventory incremental desde: ${sinceDate}`);
+      } else {
+        syncState.message = 'Inventario: primera descarga completa...';
+        console.log('[sync] Inventory: sin last_sync, bajando todo');
+      }
+
+      const raw = await lsFetchAll('Item', invParams, (n, total) => {
+        syncState.message = `Inventario cambios: ${n}${total?'/'+total:''}...`;
+        syncState.progress = Math.min(70 + Math.round(n / (total||1000) * 25), 95);
+      });
+
+      if (raw.length > 0) {
         inventory = normalizeInventory(raw);
-        setCache('inventory_24h', inventory);
-        console.log(`[sync] Inventory: ${inventory.length}`);
-        if (inventory.length && SUPABASE_URL) {
-          syncState.message = 'Guardando inventario...';
-          await sbUpsert('inventory', inventory.map(item => ({ id: item['System ID'] || String(item.itemID || ''), ...item })));
+        console.log(`[sync] Inventory cambios: ${inventory.length} items`);
+        if (SUPABASE_URL) {
+          syncState.message = `Actualizando ${inventory.length} items...`;
+          await sbUpsert('inventory', inventory.map(item => ({ id: item['System ID'], ...item })));
           inventory = [];
         }
-      } catch(e) { console.error('[sync] Inventory error:', e.message); errors.push({ source:'inventory', error:e.message }); }
+      } else {
+        console.log('[sync] Inventory: sin cambios desde último sync ✅');
+        syncState.message = 'Inventario sin cambios ✅';
+      }
+    } catch(e) {
+      console.error('[sync] Inventory error:', e.message);
+      errors.push({ source:'inventory', error:e.message });
     }
 
     if (SUPABASE_URL) { await sbSetLastSync(new Date().toISOString()); console.log('[Supabase] Sync complete'); }
