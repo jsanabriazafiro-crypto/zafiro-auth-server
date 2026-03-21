@@ -1,11 +1,15 @@
 /**
- * ZAFIRO AUTH + DATA SERVER v2.2
- * Fixes: cursor pagination, valid Sale relations, correct field mapping
+ * ZAFIRO AUTH + DATA SERVER v2.4
+ * - Cursor pagination
+ * - Supabase persistence (transactions, lines, inventory, refresh token)
+ * - Auto token rotation via Supabase
+ * - Background sync with progress
  */
 const https = require('https');
 const http  = require('http');
 const PORT  = process.env.PORT || 3000;
 
+// ── Credenciales ──────────────────────────────────────────────────
 const BASE_URL         = process.env.BASE_URL || 'https://zafiro-auth-server.onrender.com';
 const LS_ACCOUNT_ID    = process.env.LS_ACCOUNT_ID || '192029';
 const LS_CLIENT_ID     = process.env.LS_CLIENT_ID || '';
@@ -13,8 +17,40 @@ const LS_CLIENT_SECRET = process.env.LS_CLIENT_SECRET || '';
 let   LS_REFRESH_TOKEN = process.env.LS_REFRESH_TOKEN || '';
 const SHOPIFY_SHOP     = process.env.SHOPIFY_SHOP || 'zafiro-clothing.myshopify.com';
 const SHOPIFY_TOKEN    = process.env.SHOPIFY_TOKEN || '';
+const SUPABASE_URL     = process.env.SUPABASE_URL || '';
+const SUPABASE_KEY     = process.env.SUPABASE_KEY || '';
+const RENDER_API_KEY   = process.env.RENDER_API_KEY || '';
+const RENDER_SERVICE_ID= process.env.RENDER_SERVICE_ID || '';
 
-// ── Supabase helpers ─────────────────────────────────────────────
+// ── Token cache ───────────────────────────────────────────────────
+let lsAccessToken = '';
+let lsTokenExpiry = 0;
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// ── HTTP helpers ──────────────────────────────────────────────────
+function httpGet(hostname, path, headers = {}) {
+  return new Promise((resolve, reject) => {
+    https.request({ hostname, path, method: 'GET', headers }, res => {
+      let data = '';
+      res.on('data', c => data += c);
+      res.on('end', () => resolve({ status: res.statusCode, body: data, headers: res.headers }));
+    }).on('error', reject).end();
+  });
+}
+
+function httpPost(hostname, path, body, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const buf = Buffer.from(body);
+    const req = https.request(
+      { hostname, path, method: 'POST', headers: { 'Content-Length': buf.length, ...headers } },
+      res => { let d = ''; res.on('data', c => d += c); res.on('end', () => resolve({ status: res.statusCode, body: d })); }
+    );
+    req.on('error', reject); req.write(body); req.end();
+  });
+}
+
+// ── Supabase helpers ──────────────────────────────────────────────
 async function sbUpsert(table, rows) {
   if (!SUPABASE_URL || !SUPABASE_KEY || !rows.length) return;
   const chunkSize = 500;
@@ -60,7 +96,7 @@ async function sbSelect(table) {
 }
 
 async function sbGetLastSync() {
-  const rows = await sbSelect('sync_meta');
+  const rows = await sbSelect('sync_meta').catch(() => []);
   return rows?.find(r => r.key === 'last_sync')?.value || null;
 }
 
@@ -70,91 +106,17 @@ async function sbSetLastSync(ts) {
 
 async function sbGetRefreshToken() {
   if (!SUPABASE_URL || !SUPABASE_KEY) return null;
-  const rows = await sbSelect('app_config');
+  const rows = await sbSelect('app_config').catch(() => []);
   return rows?.find(r => r.key === 'ls_refresh_token')?.value || null;
 }
 
 async function sbSaveRefreshToken(token) {
   if (!SUPABASE_URL || !SUPABASE_KEY || !token) return;
-  await sbUpsert('app_config', [{ 
-    id: 'ls_refresh_token', 
-    key: 'ls_refresh_token', 
-    value: token,
-    updated_at: new Date().toISOString()
+  await sbUpsert('app_config', [{
+    id: 'ls_refresh_token', key: 'ls_refresh_token', value: token
   }]);
   console.log('[Supabase] ✅ Refresh token guardado');
 }
-
-let lsAccessToken = '';
-let lsTokenExpiry = 0;
-
-// ── Auto-update LS_REFRESH_TOKEN en Render cuando rota ────────────
-const RENDER_API_KEY    = process.env.RENDER_API_KEY    || '';
-const RENDER_SERVICE_ID = process.env.RENDER_SERVICE_ID || '';
-
-// ── Supabase config ───────────────────────────────────────────────
-const SUPABASE_URL = process.env.SUPABASE_URL || '';
-const SUPABASE_KEY = process.env.SUPABASE_KEY || ''; // service_role key
-
-async function updateRefreshTokenInRender(newToken) {
-  if (!RENDER_API_KEY || !RENDER_SERVICE_ID) return;
-  try {
-    // Use PATCH to update only LS_REFRESH_TOKEN without affecting other env vars
-    const body = JSON.stringify({ value: newToken });
-    const buf  = Buffer.from(body);
-    await new Promise((resolve) => {
-      const req = https.request({
-        hostname: 'api.render.com',
-        path: `/v1/services/${RENDER_SERVICE_ID}/env-vars/LS_REFRESH_TOKEN`,
-        method: 'PATCH',
-        headers: {
-          'Authorization': `Bearer ${RENDER_API_KEY}`,
-          'Content-Type': 'application/json',
-          'Content-Length': buf.length,
-        }
-      }, res => {
-        let d = '';
-        res.on('data', c => d += c);
-        res.on('end', () => {
-          if (res.statusCode < 300) {
-            console.log('[Render] ✅ LS_REFRESH_TOKEN actualizado');
-          } else {
-            console.log('[Render] ⚠️', res.statusCode, d.slice(0,100));
-          }
-          resolve();
-        });
-      });
-      req.on('error', e => { console.error('[Render]', e.message); resolve(); });
-      req.write(body); req.end();
-    });
-  } catch(e) {
-    console.error('[Render] Error:', e.message);
-  }
-}
-
-// ── HTTP helpers ──────────────────────────────────────────────────
-function httpGet(hostname, path, headers = {}) {
-  return new Promise((resolve, reject) => {
-    https.request({ hostname, path, method: 'GET', headers }, res => {
-      let data = '';
-      res.on('data', c => data += c);
-      res.on('end', () => resolve({ status: res.statusCode, body: data, headers: res.headers }));
-    }).on('error', reject).end();
-  });
-}
-
-function httpPost(hostname, path, body, headers = {}) {
-  return new Promise((resolve, reject) => {
-    const buf = Buffer.from(body);
-    const req = https.request(
-      { hostname, path, method: 'POST', headers: { 'Content-Length': buf.length, ...headers } },
-      res => { let d = ''; res.on('data', c => d += c); res.on('end', () => resolve({ status: res.statusCode, body: d })); }
-    );
-    req.on('error', reject); req.write(body); req.end();
-  });
-}
-
-const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // ── Lightspeed token ──────────────────────────────────────────────
 async function getLSToken() {
@@ -172,92 +134,74 @@ async function getLSToken() {
   lsTokenExpiry = Date.now() + (j.expires_in || 3600) * 1000;
   if (j.refresh_token && j.refresh_token !== LS_REFRESH_TOKEN) {
     LS_REFRESH_TOKEN = j.refresh_token;
-    sbSaveRefreshToken(j.refresh_token); // persist to Supabase
-    updateRefreshTokenInRender(j.refresh_token); // best-effort Render update
+    sbSaveRefreshToken(j.refresh_token);
   }
   console.log('[LS] Token OK, expira en', j.expires_in, 's');
   return lsAccessToken;
 }
 
 // ── Lightspeed fetch con cursor pagination ────────────────────────
-// V3 API ya no soporta offset — usa after/next cursor
-async function lsFetchAll(endpoint, params = {}, onProgress = null, onBatch = null) {
+async function lsFetchAll(endpoint, params = {}, onProgress = null) {
   const token = await getLSToken();
   const base  = `/API/V3/Account/${LS_ACCOUNT_ID}`;
   const all   = [];
-  let   afterCursor = null;
-  let   pageCount   = 0;
+  let afterCursor = null;
+  let pageCount   = 0;
 
   while (true) {
     const p = { ...params, limit: 100 };
     if (afterCursor) p.after = afterCursor;
-
     const qs   = new URLSearchParams(p).toString();
     const path = `${base}/${endpoint}.json?${qs}`;
     console.log(`[LS] GET ${endpoint} page=${pageCount + 1}`);
-
     if (pageCount > 0) await sleep(300);
 
     const r = await httpGet('api.lightspeedapp.com', path, {
-      Authorization: `Bearer ${token}`,
-      Accept: 'application/json',
+      Authorization: `Bearer ${token}`, Accept: 'application/json',
     });
 
-    if (r.status === 429) { console.log('[LS] Rate limited, esperando...'); await sleep(1500); continue; }
+    if (r.status === 429) { console.log('[LS] Rate limited...'); await sleep(1500); continue; }
+
     if (r.status === 401) {
-      // Token expirado mid-sync — renovar y reintentar esta página
-      console.log('[LS] Token expirado mid-sync, renovando...');
-      lsAccessToken = ''; // forzar renovación
+      console.log('[LS] Token expirado, renovando...');
+      lsAccessToken = '';
       const newToken = await getLSToken();
       const r2 = await httpGet('api.lightspeedapp.com', path, {
         Authorization: `Bearer ${newToken}`, Accept: 'application/json',
       });
-      if (r2.status !== 200) throw new Error(`LS ${endpoint} HTTP ${r2.status} after token refresh`);
-      const json2  = JSON.parse(r2.body);
-      const attrs2 = json2['@attributes'] || {};
-      const raw2   = json2[endpoint];
+      if (r2.status !== 200) throw new Error(`LS ${endpoint} HTTP ${r2.status} after refresh`);
+      const j2 = JSON.parse(r2.body);
+      const a2 = j2['@attributes'] || {};
+      const raw2 = j2[endpoint];
       if (!raw2) break;
       const arr2 = Array.isArray(raw2) ? raw2 : [raw2];
-      all.push(...arr2);
-      pageCount++;
-      if (attrs2.next) {
-        try { const u = new URL(attrs2.next.startsWith('http') ? attrs2.next : 'https://api.lightspeedapp.com' + attrs2.next); afterCursor = u.searchParams.get('after'); } catch(e) { afterCursor = null; }
-      } else { afterCursor = null; }
+      all.push(...arr2); pageCount++;
+      if (onProgress) onProgress(all.length, parseInt(a2.count || 0));
+      if (a2.next) { try { const u = new URL(a2.next.startsWith('http') ? a2.next : 'https://api.lightspeedapp.com' + a2.next); afterCursor = u.searchParams.get('after'); } catch(e) { afterCursor = null; } }
+      else afterCursor = null;
       if (!afterCursor || arr2.length < 100) break;
       continue;
     }
+
     if (r.status !== 200) throw new Error(`LS ${endpoint} HTTP ${r.status}: ${r.body.slice(0, 300)}`);
 
     const json  = JSON.parse(r.body);
     const attrs = json['@attributes'] || {};
     const raw   = json[endpoint];
-
     if (!raw) break;
     const arr = Array.isArray(raw) ? raw : [raw];
-    all.push(...arr);
-    pageCount++;
+    all.push(...arr); pageCount++;
 
     const total = parseInt(attrs.count || 0);
     console.log(`[LS] ${endpoint}: ${all.length}/${total || '?'}`);
-    if (onProgress) onProgress(all.length, total || 0);
-    if (onBatch) await onBatch(arr); // stream each batch to Supabase
+    if (onProgress) onProgress(all.length, total);
 
-    // Cursor pagination — usar 'after' token si existe
     if (attrs.next) {
-      // attrs.next es una URL completa — extraer el cursor 'after'
-      try {
-        const nextUrl = new URL(attrs.next.startsWith('http') ? attrs.next : 'https://api.lightspeedapp.com' + attrs.next);
-        afterCursor = nextUrl.searchParams.get('after');
-      } catch(e) {
-        afterCursor = null;
-      }
-    } else {
-      afterCursor = null;
-    }
+      try { const u = new URL(attrs.next.startsWith('http') ? attrs.next : 'https://api.lightspeedapp.com' + attrs.next); afterCursor = u.searchParams.get('after'); } catch(e) { afterCursor = null; }
+    } else afterCursor = null;
 
     if (!afterCursor || arr.length < 100 || (total && all.length >= total)) break;
   }
-
   return all;
 }
 
@@ -290,31 +234,19 @@ const SHOP_MAP = {
 };
 
 function normalizeSales(sales) {
-  return sales.map(s => {
-    // Shop/Register info comes directly on Sale object (not as loaded relation)
-    // shopName and registerName are flat fields in the Sale response
-    const shopName = s.shopName || s.Shop?.name || '';
-    // Employee name comes as direct field on Sale (employeeName)
-    // when Employee relation is not loaded
-    const empName = s.employeeName || 
-      (s.Employee ? `${s.Employee.firstName||''} ${s.Employee.lastName||''}`.trim() : '') ||
-      (s.employeeID ? `Emp#${s.employeeID}` : '');
-    return {
-      ID:        String(s.saleID || ''),
-      Completed: (s.completed === 'true' || s.completed === true) ? 'Yes' : 'No',
-      Cancelled: 'No',
-      Voided:    (s.voided === 'true' || s.voided === true) ? 'Yes' : 'No',
-      Total:     `$${parseFloat(s.calcTotal || 0).toFixed(2)}`,
-      Date:      (s.timeStamp || '').slice(0, 16).replace('T', ' '),
-      Register:  s.registerName || s.Register?.name || '',
-      Shop:      SHOP_MAP[shopName] || shopName,
-      Employee:  empName,
-      Customer:  s.Customer
-        ? `${s.Customer.firstName || ''} ${s.Customer.lastName || ''}`.trim()
-        : '',
-      Source: 'API',
-    };
-  });
+  return sales.map(s => ({
+    ID:        String(s.saleID || ''),
+    Completed: (s.completed === 'true' || s.completed === true) ? 'Yes' : 'No',
+    Cancelled: 'No',
+    Voided:    (s.voided === 'true' || s.voided === true) ? 'Yes' : 'No',
+    Total:     `$${parseFloat(s.calcTotal || 0).toFixed(2)}`,
+    Date:      (s.timeStamp || '').slice(0, 16).replace('T', ' '),
+    Register:  s.registerName || '',
+    Shop:      SHOP_MAP[s.shopName || s.Shop?.name || ''] || s.shopName || '',
+    Employee:  s.employeeName || (s.Employee ? `${s.Employee.firstName||''} ${s.Employee.lastName||''}`.trim() : '') || '',
+    Customer:  s.Customer ? `${s.Customer.firstName||''} ${s.Customer.lastName||''}`.trim() : '',
+    Source:    'API',
+  }));
 }
 
 function normalizeLines(lines) {
@@ -342,14 +274,13 @@ function normalizeLines(lines) {
 function normalizeInventory(items) {
   return items.map(item => {
     const row = {
-      'System ID':   String(item.itemID || ''),
-      'system_id':   String(item.itemID || ''),
-      'Item':        item.description || '',
-      'Brand':       item.Manufacturer?.name || '',
-      'Category':    item.Category?.name || '',
+      'System ID':     String(item.itemID || ''),
+      'Item':          item.description || '',
+      'Brand':         item.Manufacturer?.name || '',
+      'Category':      item.Category?.name || '',
       'Subcategory 1': '',
       'Subcategory 2': '',
-      'Price':       `$${parseFloat(item.Prices?.ItemPrice?.amount || 0).toFixed(2)}`,
+      'Price':         `$${parseFloat(item.Prices?.ItemPrice?.amount || 0).toFixed(2)}`,
       ' Zafiro Mall Of San Juan ':    '0',
       ' Zafiro Plaza Del Caribe ':    '0',
       ' Zafiro Plaza Del Sol ':       '0',
@@ -381,32 +312,19 @@ const cache = {};
 const getCached = (k, ttl) => { const h = cache[k]; return h && Date.now()-h.ts < ttl ? h.data : null; };
 const setCache  = (k, d)   => { cache[k] = { ts: Date.now(), data: d }; };
 
-// ── Background sync state ─────────────────────────────────────────
-const syncState = {
-  running: false,
-  progress: 0,
-  message: '',
-  result: null,
-  error: null,
-  startedAt: null,
-  key: null,
-};
+// ── Background sync ───────────────────────────────────────────────
+const syncState = { running:false, progress:0, message:'', result:null, error:null, key:null };
 
 async function runSyncBackground(from, to) {
-  if (syncState.running) return; // already running
-  syncState.running  = true;
-  syncState.progress = 0;
-  syncState.result   = null;
-  syncState.error    = null;
-  syncState.startedAt = new Date().toISOString();
-  syncState.key = `${from}_${to}`;
+  if (syncState.running) return;
+  syncState.running = true; syncState.progress = 0; syncState.result = null;
+  syncState.error = null; syncState.key = `${from}_${to}`;
 
   try {
     const errors = [];
 
     // Transacciones
-    syncState.message = 'Descargando transacciones...';
-    syncState.progress = 10;
+    syncState.message = 'Descargando transacciones...'; syncState.progress = 10;
     let transactions = [];
     try {
       const raw = await lsFetchAll('Sale', {
@@ -414,106 +332,83 @@ async function runSyncBackground(from, to) {
         timeStamp: `><,${from}T00:00:00-04:00,${to}T23:59:59-04:00`,
         completed: 'true',
       }, (n, total) => {
-        syncState.message = `Transacciones: ${n}${total ? '/'+total : ''}...`;
-        syncState.progress = Math.min(10 + Math.round(n / (total||65000) * 30), 40);
+        syncState.message = `Transacciones: ${n}${total?'/'+total:''}...`;
+        syncState.progress = Math.min(10 + Math.round(n/(total||65000)*30), 40);
       });
       transactions = normalizeSales(raw);
       console.log(`[sync] Transactions: ${transactions.length}`);
       if (transactions.length && SUPABASE_URL) {
-        syncState.message = 'Guardando transacciones en Supabase...';
+        syncState.message = 'Guardando transacciones...';
         await sbUpsert('transactions', transactions.map(t => ({ id: t.ID, ...t })));
-        transactions = []; // free memory
+        transactions = [];
       }
-    } catch(e) {
-      console.error('[sync] Transactions error:', e.message);
-      errors.push({ source:'transactions', error:e.message });
-    }
+    } catch(e) { console.error('[sync] Transactions error:', e.message); errors.push({ source:'transactions', error:e.message }); }
 
     // Lines
-    syncState.message = 'Descargando líneas de venta...';
-    syncState.progress = 45;
+    syncState.message = 'Descargando líneas...'; syncState.progress = 45;
     let lines = [];
     try {
       const raw = await lsFetchAll('SaleLine', {
         load_relations: JSON.stringify(['Item']),
         timeStamp: `><,${from}T00:00:00-04:00,${to}T23:59:59-04:00`,
       }, (n, total) => {
-        syncState.message = `Lines: ${n}${total ? '/'+total : ''}...`;
-        syncState.progress = Math.min(45 + Math.round(n / (total||80000) * 20), 65);
+        syncState.message = `Lines: ${n}${total?'/'+total:''}...`;
+        syncState.progress = Math.min(45 + Math.round(n/(total||80000)*20), 65);
       });
       lines = normalizeLines(raw);
       console.log(`[sync] Lines: ${lines.length}`);
       if (lines.length && SUPABASE_URL) {
-        syncState.message = 'Guardando lines en Supabase...';
+        syncState.message = 'Guardando lines...';
         await sbUpsert('lines', lines.map((l,i) => ({ id: `${l.ID}_${i}`, ...l })));
-        lines = []; // free memory
+        lines = [];
       }
-    } catch(e) {
-      console.error('[sync] Lines error:', e.message);
-      errors.push({ source:'lines', error:e.message });
-    }
+    } catch(e) { console.error('[sync] Lines error:', e.message); errors.push({ source:'lines', error:e.message }); }
 
-    // Inventario — cache 24h para no re-descargar en cada sync
-    syncState.message = 'Verificando inventario...';
-    syncState.progress = 70;
+    // Inventario (cache 24h)
+    syncState.message = 'Verificando inventario...'; syncState.progress = 70;
     let inventory = [];
     const cachedInv = getCached('inventory_24h', 24*60*60*1000);
     if (cachedInv) {
       inventory = cachedInv;
-      console.log(`[sync] Inventory from 24h cache: ${inventory.length} items`);
-      syncState.message = `Inventario desde cache (${inventory.length} items)`;
-      syncState.progress = 95;
+      console.log(`[sync] Inventory from cache: ${inventory.length} items`);
     } else {
       try {
         const raw = await lsFetchAll('Item', {
           load_relations: JSON.stringify(['Category', 'Manufacturer', 'ItemShops']),
           archived: 'false',
         }, (n, total) => {
-          syncState.message = `Inventario: ${n}${total ? '/'+total : ''}...`;
-          syncState.progress = Math.min(70 + Math.round(n / (total||45000) * 25), 95);
+          syncState.message = `Inventario: ${n}${total?'/'+total:''}...`;
+          syncState.progress = Math.min(70 + Math.round(n/(total||45000)*25), 95);
         });
         inventory = normalizeInventory(raw);
         setCache('inventory_24h', inventory);
         console.log(`[sync] Inventory: ${inventory.length}`);
         if (inventory.length && SUPABASE_URL) {
-          syncState.message = 'Guardando inventario en Supabase...';
-          await sbUpsert('inventory', inventory.map(item => ({ id: item['system_id'] || item['System ID'], ...item })));
-          inventory = []; // free memory
-          await sbSetLastSync(new Date().toISOString());
-          inventory = []; // free memory
+          syncState.message = 'Guardando inventario...';
+          await sbUpsert('inventory', inventory.map(item => ({ id: item['System ID'], ...item })));
+          inventory = [];
         }
-      } catch(e) {
-        console.error('[sync] Inventory error:', e.message);
-        errors.push({ source:'inventory', error:e.message });
-      }
+      } catch(e) { console.error('[sync] Inventory error:', e.message); errors.push({ source:'inventory', error:e.message }); }
     }
 
-    // Mark sync complete in Supabase
-    if (!errors.length && SUPABASE_URL) {
-      await sbSetLastSync(new Date().toISOString());
-      console.log('[Supabase] Sync complete, last_sync updated');
-    }
+    if (SUPABASE_URL) { await sbSetLastSync(new Date().toISOString()); console.log('[Supabase] Sync complete'); }
 
     const result = { ok:true, ts:new Date().toISOString(), from, to,
-      counts:{ transactions:transactions.length, lines:lines.length, inventory:inventory.length },
-      transactions:[], lines:[], inventory:[], // data is in Supabase, not in memory
+      counts:{ transactions:0, lines:0, inventory:0 },
+      transactions:[], lines:[], inventory:[],
       errors: errors.length ? errors : undefined };
 
-    if (!errors.length) setCache(syncState.key, result);
-    syncState.result   = result;
-    syncState.progress = 100;
-    syncState.message  = `✅ Completado — ${transactions.length} tx, ${lines.length} lines, ${inventory.length} items`;
+    setCache(syncState.key, result);
+    syncState.result = result; syncState.progress = 100;
+    syncState.message = `✅ Completado`;
 
   } catch(e) {
     console.error('[sync] Fatal error:', e.message);
-    syncState.error   = e.message;
-    syncState.message = '❌ Error: ' + e.message;
-  } finally {
-    syncState.running = false;
-  }
+    syncState.error = e.message; syncState.message = '❌ Error: ' + e.message;
+  } finally { syncState.running = false; }
 }
 
-// ── Server ────────────────────────────────────────────────────────
+// ── HTTP Server ───────────────────────────────────────────────────
 http.createServer(async (req, res) => {
   const u = new URL(req.url, 'http://x');
   const pathname = u.pathname;
@@ -529,39 +424,33 @@ http.createServer(async (req, res) => {
   const R = l => { res.writeHead(302, {Location:l}); res.end(); };
 
   try {
-    // HOME
     if (pathname === '/') {
       return H(`<!DOCTYPE html><html><head><meta charset="UTF-8"/><title>Zafiro Server</title>
 <style>body{font-family:sans-serif;background:#0d0d1a;color:#F2EDE6;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;}
 .box{text-align:center;}.btn{display:inline-block;margin:8px;padding:12px 28px;border-radius:10px;text-decoration:none;font-weight:600;}
 .ls{background:rgba(201,169,110,.15);border:1px solid rgba(201,169,110,.4);color:#C9A96E;}
 .ok{background:rgba(74,222,128,.12);border:1px solid rgba(74,222,128,.3);color:#4ade80;font-size:12px;}</style></head>
-<body><div class="box"><h1 style="color:#C9A96E">🏪 Zafiro Auth Server v2.2</h1>
+<body><div class="box"><h1 style="color:#C9A96E">🏪 Zafiro Auth Server v2.4</h1>
 <a href="/lightspeed/start" class="btn ls">⚡ Conectar Lightspeed</a><br/><br/>
 <a href="/api/health" class="btn ok">✅ Health Check</a></div></body></html>`);
     }
 
-    // HEALTH
     if (pathname === '/api/health') {
       const lastSync = await sbGetLastSync().catch(() => null);
-      return J({ status:'ok', version:'2.3',
+      return J({ status:'ok', version:'2.4',
         lightspeed: LS_CLIENT_ID && LS_REFRESH_TOKEN ? 'configured' : 'missing credentials',
         shopify: SHOPIFY_TOKEN ? 'configured' : 'missing token',
         supabase: SUPABASE_URL ? 'configured' : 'not configured',
-        account_id: LS_ACCOUNT_ID,
-        last_sync: lastSync,
+        account_id: LS_ACCOUNT_ID, last_sync: lastSync,
         server_time: new Date().toISOString() });
     }
 
-    // LOAD FROM SUPABASE — serve persisted data without hitting Lightspeed
     if (pathname === '/api/data') {
       if (!SUPABASE_URL) return J({ ok:false, error:'Supabase not configured' }, 503);
       try {
-        console.log('[Supabase] Loading persisted data...');
+        console.log('[Supabase] Loading data...');
         const [transactions, lines, inventory] = await Promise.all([
-          sbSelect('transactions'),
-          sbSelect('lines'),
-          sbSelect('inventory'),
+          sbSelect('transactions'), sbSelect('lines'), sbSelect('inventory'),
         ]);
         const lastSync = await sbGetLastSync();
         console.log(`[Supabase] Loaded: ${transactions.length} tx, ${lines.length} lines, ${inventory.length} items`);
@@ -569,15 +458,12 @@ http.createServer(async (req, res) => {
           from:'2025-01-01', to:new Date().toISOString().slice(0,10),
           counts:{ transactions:transactions.length, lines:lines.length, inventory:inventory.length },
           transactions, lines, inventory });
-      } catch(e) {
-        return J({ ok:false, error:e.message }, 500);
-      }
+      } catch(e) { return J({ ok:false, error:e.message }, 500); }
     }
 
-    // LIGHTSPEED OAUTH
     if (pathname === '/lightspeed/start') {
       const p = new URLSearchParams({ response_type:'code', client_id:LS_CLIENT_ID,
-        scope:'employee:register employee:inventory employee:reports', state:'zafiro2026' });
+        scope:'employee:all', state:'zafiro2026' });
       return R(`https://cloud.lightspeedapp.com/auth/oauth/authorize?${p}`);
     }
 
@@ -594,61 +480,41 @@ http.createServer(async (req, res) => {
       lsTokenExpiry = Date.now() + (d.expires_in||3600)*1000;
       if (d.refresh_token) {
         LS_REFRESH_TOKEN = d.refresh_token;
-        sbSaveRefreshToken(d.refresh_token); // persist to Supabase
-        updateRefreshTokenInRender(d.refresh_token); // best-effort Render update
+        await sbSaveRefreshToken(d.refresh_token);
       }
       return H(`<!DOCTYPE html><html><head><meta charset="UTF-8"/><style>
 body{font-family:monospace;background:#0d0d1a;color:#F2EDE6;padding:40px;}
 .t{background:#1a1a2e;padding:16px;border-radius:8px;word-break:break-all;border:1px solid rgba(201,169,110,.3);color:#C9A96E;margin:8px 0;}
 .b{background:rgba(201,169,110,.15);border:1px solid rgba(201,169,110,.4);color:#C9A96E;padding:6px 14px;border-radius:6px;cursor:pointer;}</style></head>
-<body><h2 style="color:#C9A96E">✅ Lightspeed conectado</h2>
-<p style="color:#7070A0">Copia y agrega en Render como <strong>LS_REFRESH_TOKEN</strong>:</p>
-<div class="t" id="rt">${d.refresh_token||'(no incluido)'}</div>
-<button class="b" onclick="navigator.clipboard.writeText(document.getElementById('rt').textContent).then(()=>this.textContent='✅ Copiado')">Copiar</button>
-<p style="color:#7070A0;font-size:12px;margin-top:16px;">Expira en ${d.expires_in}s. El Refresh Token no expira si se usa cada 30 días.</p>
+<body><h2 style="color:#C9A96E">✅ Lightspeed conectado y token guardado en Supabase</h2>
+<p style="color:#4ade80">✅ El token se guardó automáticamente — no necesitas copiarlo.</p>
+<p style="color:#7070A0;font-size:12px;">Scope: employee:all | Expira en ${d.expires_in}s</p>
 <a href="/" style="color:#60a5fa">← Inicio</a></body></html>`);
     }
 
-    // SYNC — inicia en background, responde inmediatamente
     if (pathname === '/api/sync') {
       if (!LS_REFRESH_TOKEN) return J({ ok:false, error:'LS_REFRESH_TOKEN no configurado' }, 503);
       const { from, to } = query;
       if (!from || !to) return J({ ok:false, error:'Faltan from y to' }, 400);
-
-      // Check cache first
       const ck = `${from}_${to}`;
       const cached = getCached(ck, 15*60*1000);
       if (cached) { console.log('[sync] Cache hit'); return J(cached); }
-
-      // If sync already running for same range, return status
-      if (syncState.running && syncState.key === ck) {
+      if (syncState.running && syncState.key === ck)
         return J({ ok:'syncing', progress:syncState.progress, message:syncState.message });
-      }
-
-      // Start background sync and return immediately
       console.log(`[sync] Iniciando background sync ${from} → ${to}`);
-      runSyncBackground(from, to); // fire and forget
+      runSyncBackground(from, to);
       return J({ ok:'syncing', progress:0, message:'Iniciando sync...' });
     }
 
-    // SYNC STATUS — polling endpoint
     if (pathname === '/api/sync/status') {
       const { from, to } = query;
       const ck = from && to ? `${from}_${to}` : syncState.key;
-
-      // Check cache
-      if (ck) {
-        const cached = getCached(ck, 15*60*1000);
-        if (cached) return J(cached); // done, return full data
-      }
-
-      // Return current state
+      if (ck) { const cached = getCached(ck, 15*60*1000); if (cached) return J(cached); }
       if (syncState.error) return J({ ok:false, error:syncState.error });
-      if (syncState.result) return J(syncState.result); // completed
+      if (syncState.result) return J(syncState.result);
       return J({ ok:'syncing', progress:syncState.progress, message:syncState.message, running:syncState.running });
     }
 
-    // SHOPIFY PRODUCTS
     if (pathname === '/api/shopify/products/all') {
       const cached = getCached('shopify_products', 30*60*1000);
       if (cached) return J(cached);
@@ -666,7 +532,6 @@ body{font-family:monospace;background:#0d0d1a;color:#F2EDE6;padding:40px;}
       return J(result);
     }
 
-    // SHOPIFY ORDERS
     if (pathname === '/api/shopify/orders') {
       const since = new Date(Date.now()-(parseInt(query.days)||30)*86400000).toISOString();
       const orders = await shopifyFetch(`orders.json?status=any&created_at_min=${since}`);
@@ -680,7 +545,19 @@ body{font-family:monospace;background:#0d0d1a;color:#F2EDE6;padding:40px;}
     return J({ ok:false, error:err.message }, 500);
   }
 
-}).listen(PORT, () => {
-  console.log(`🏪 Zafiro Auth Server v2.2 en puerto ${PORT}`);
-  console.log(`   LS: ${LS_CLIENT_ID?'✅':'❌'} | Shopify: ${SHOPIFY_TOKEN?'✅':'❌'} | Account: ${LS_ACCOUNT_ID}`);
+}).listen(PORT, async () => {
+  console.log(`🏪 Zafiro Auth Server v2.4 en puerto ${PORT}`);
+  console.log(`   LS: ${LS_CLIENT_ID?'✅':'❌'} | Shopify: ${SHOPIFY_TOKEN?'✅':'❌'} | Supabase: ${SUPABASE_URL?'✅':'❌'}`);
+  // Cargar refresh token desde Supabase al arrancar
+  if (SUPABASE_URL && SUPABASE_KEY) {
+    try {
+      const savedToken = await sbGetRefreshToken();
+      if (savedToken) {
+        LS_REFRESH_TOKEN = savedToken;
+        console.log('[Supabase] ✅ Refresh token cargado — listo para sync');
+      } else {
+        console.log('[Supabase] ⚠️ No hay token guardado — visita /lightspeed/start');
+      }
+    } catch(e) { console.error('[Supabase] Error cargando token:', e.message); }
+  }
 });
