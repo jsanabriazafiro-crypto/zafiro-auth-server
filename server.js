@@ -168,7 +168,7 @@ async function getLSToken() {
 
 // ── Lightspeed fetch con cursor pagination ────────────────────────
 // V3 API ya no soporta offset — usa after/next cursor
-async function lsFetchAll(endpoint, params = {}, onProgress = null) {
+async function lsFetchAll(endpoint, params = {}, onProgress = null, onBatch = null) {
   const token = await getLSToken();
   const base  = `/API/V3/Account/${LS_ACCOUNT_ID}`;
   const all   = [];
@@ -227,6 +227,7 @@ async function lsFetchAll(endpoint, params = {}, onProgress = null) {
     const total = parseInt(attrs.count || 0);
     console.log(`[LS] ${endpoint}: ${all.length}/${total || '?'}`);
     if (onProgress) onProgress(all.length, total || 0);
+    if (onBatch) await onBatch(arr); // stream each batch to Supabase
 
     // Cursor pagination — usar 'after' token si existe
     if (attrs.next) {
@@ -404,6 +405,11 @@ async function runSyncBackground(from, to) {
       });
       transactions = normalizeSales(raw);
       console.log(`[sync] Transactions: ${transactions.length}`);
+      if (transactions.length && SUPABASE_URL) {
+        syncState.message = 'Guardando transacciones en Supabase...';
+        await sbUpsert('transactions', transactions.map(t => ({ id: t.ID, ...t })));
+        transactions = []; // free memory
+      }
     } catch(e) {
       console.error('[sync] Transactions error:', e.message);
       errors.push({ source:'transactions', error:e.message });
@@ -423,6 +429,11 @@ async function runSyncBackground(from, to) {
       });
       lines = normalizeLines(raw);
       console.log(`[sync] Lines: ${lines.length}`);
+      if (lines.length && SUPABASE_URL) {
+        syncState.message = 'Guardando lines en Supabase...';
+        await sbUpsert('lines', lines.map((l,i) => ({ id: `${l.ID}_${i}`, ...l })));
+        lines = []; // free memory
+      }
     } catch(e) {
       console.error('[sync] Lines error:', e.message);
       errors.push({ source:'lines', error:e.message });
@@ -450,36 +461,27 @@ async function runSyncBackground(from, to) {
         inventory = normalizeInventory(raw);
         setCache('inventory_24h', inventory);
         console.log(`[sync] Inventory: ${inventory.length}`);
+        if (inventory.length && SUPABASE_URL) {
+          syncState.message = 'Guardando inventario en Supabase...';
+          await sbUpsert('inventory', inventory.map(item => ({ id: item['System ID'], ...item })));
+          await sbSetLastSync(new Date().toISOString());
+          inventory = []; // free memory
+        }
       } catch(e) {
         console.error('[sync] Inventory error:', e.message);
         errors.push({ source:'inventory', error:e.message });
       }
     }
 
-    // Save to Supabase for persistence
+    // Mark sync complete in Supabase
     if (!errors.length && SUPABASE_URL) {
-      syncState.message = 'Guardando en base de datos...';
-      syncState.progress = 97;
-      try {
-        // Transform for Supabase (need 'id' field for upsert)
-        const txRows  = transactions.map(t => ({ id: t.ID, ...t }));
-        const slRows  = lines.map((l, i) => ({ id: `${l.ID}_${i}`, ...l }));
-        const invRows = inventory.map(item => ({ id: item['System ID'], ...item }));
-        await Promise.all([
-          sbUpsert('transactions', txRows),
-          sbUpsert('lines', slRows),
-          sbUpsert('inventory', invRows),
-        ]);
-        await sbSetLastSync(new Date().toISOString());
-        console.log('[Supabase] All data saved');
-      } catch(e) {
-        console.error('[Supabase] Save error:', e.message);
-      }
+      await sbSetLastSync(new Date().toISOString());
+      console.log('[Supabase] Sync complete, last_sync updated');
     }
 
     const result = { ok:true, ts:new Date().toISOString(), from, to,
-      counts:{ transactions:transactions.length, lines:lines.length, inventory:inventory.length },
-      transactions, lines, inventory,
+      counts:{ transactions:txCount||transactions.length, lines:linesCount||lines.length, inventory:invCount||inventory.length },
+      transactions:[], lines:[], inventory:[], // data is in Supabase, not in memory
       errors: errors.length ? errors : undefined };
 
     if (!errors.length) setCache(syncState.key, result);
