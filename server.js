@@ -241,9 +241,9 @@ function normalizeSales(sales) {
     Voided:    (s.voided === 'true' || s.voided === true) ? 'Yes' : 'No',
     Total:     `$${parseFloat(s.calcTotal || 0).toFixed(2)}`,
     Date:      (s.timeStamp || '').slice(0, 16).replace('T', ' '),
-    Register:  s.registerName || '',
-    Shop:      SHOP_MAP[s.shopName || s.Shop?.name || ''] || s.shopName || '',
-    Employee:  s.employeeName || (s.Employee ? `${s.Employee.firstName||''} ${s.Employee.lastName||''}`.trim() : '') || '',
+    Register:  REGISTER_MAP[s.registerID] || s.registerName || '',
+    Shop:      SHOP_MAP_ID[s.shopID] || s.shopName || '',
+    Employee:  EMPLOYEE_MAP[s.employeeID] || s.employeeName || '',
     Customer:  s.Customer ? `${s.Customer.firstName||''} ${s.Customer.lastName||''}`.trim() : '',
     Source:    'API',
   }));
@@ -269,6 +269,49 @@ function normalizeLines(lines) {
       'Work Order Internal Note': '',
     };
   });
+}
+
+// ── Lookup tables (loaded from Lightspeed at startup) ────────────
+let SHOP_MAP_ID   = {}; // shopID → name
+let EMPLOYEE_MAP  = {}; // employeeID → name
+let REGISTER_MAP  = {}; // registerID → name
+
+async function loadLookupTables() {
+  if (!LS_REFRESH_TOKEN && !LS_CLIENT_ID) return;
+  try {
+    const token = await getLSToken();
+    // Shops
+    const sr = await httpGet('api.lightspeedapp.com',
+      `/API/V3/Account/${LS_ACCOUNT_ID}/Shop.json`,
+      { Authorization: `Bearer ${token}`, Accept: 'application/json' });
+    const shops = JSON.parse(sr.body).Shop || [];
+    (Array.isArray(shops) ? shops : [shops]).forEach(s => {
+      SHOP_MAP_ID[s.shopID] = s.name;
+    });
+    console.log(`[lookup] Shops: ${Object.keys(SHOP_MAP_ID).length}`);
+
+    // Employees
+    const er = await httpGet('api.lightspeedapp.com',
+      `/API/V3/Account/${LS_ACCOUNT_ID}/Employee.json?limit=100`,
+      { Authorization: `Bearer ${token}`, Accept: 'application/json' });
+    const emps = JSON.parse(er.body).Employee || [];
+    (Array.isArray(emps) ? emps : [emps]).forEach(e => {
+      EMPLOYEE_MAP[e.employeeID] = `${e.firstName||''} ${e.lastName||''}`.trim();
+    });
+    console.log(`[lookup] Employees: ${Object.keys(EMPLOYEE_MAP).length}`);
+
+    // Registers
+    const rr = await httpGet('api.lightspeedapp.com',
+      `/API/V3/Account/${LS_ACCOUNT_ID}/Register.json?limit=100`,
+      { Authorization: `Bearer ${token}`, Accept: 'application/json' });
+    const regs = JSON.parse(rr.body).Register || [];
+    (Array.isArray(regs) ? regs : [regs]).forEach(r => {
+      REGISTER_MAP[r.registerID] = r.name;
+    });
+    console.log(`[lookup] Registers: ${Object.keys(REGISTER_MAP).length}`);
+  } catch(e) {
+    console.error('[lookup] Error loading lookup tables:', e.message);
+  }
 }
 
 // shopID → inventory column (from /api/debug/shops)
@@ -525,6 +568,7 @@ http.createServer(async (req, res) => {
       if (d.refresh_token) {
         LS_REFRESH_TOKEN = d.refresh_token;
         await sbSaveRefreshToken(d.refresh_token);
+        loadLookupTables(); // load in background
       }
       return H(`<!DOCTYPE html><html><head><meta charset="UTF-8"/><style>
 body{font-family:monospace;background:#0d0d1a;color:#F2EDE6;padding:40px;}
@@ -635,6 +679,8 @@ body{font-family:monospace;background:#0d0d1a;color:#F2EDE6;padding:40px;}
       if (savedToken) {
         LS_REFRESH_TOKEN = savedToken;
         console.log('[Supabase] ✅ Refresh token cargado — listo para sync');
+      // Load lookup tables now that we have a token
+      await loadLookupTables();
       } else {
         console.log('[Supabase] ⚠️ No hay token guardado — visita /lightspeed/start');
       }
