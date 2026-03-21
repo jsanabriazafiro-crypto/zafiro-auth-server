@@ -271,16 +271,40 @@ function normalizeLines(lines) {
   });
 }
 
+// shopID → inventory column (from /api/debug/shops)
+const SHOP_ID_TO_COL = {
+  '1': ' Zafiro Storage ',
+  '2': ' Zafiro Mall Of San Juan ',
+  '3': ' Zafiro Viejo San Juan ',
+  '4': ' Zafiro Sample Sale  ',
+  '5': ' Zafiro Plaza Del Caribe ',
+  '6': ' Zafiro Plaza Del Sol ',
+  '8': ' Zafiro Plaza Las Américas  ',
+};
+
 function normalizeInventory(items) {
   return items.map(item => {
+    // Category: fullPathName = "TOPS/RASHGUARD" → Category=TOPS, Subcategory=RASHGUARD
+    const fullPath = item.Category?.fullPathName || '';
+    const pathParts = fullPath.split('/');
+    const category  = pathParts.length > 1 ? pathParts[0] : (item.Category?.name || '');
+    const subcat1   = pathParts.length > 1 ? pathParts[1] : '';
+
+    // Price: comes directly in item.Prices.ItemPrice (array or object)
+    let price = '0';
+    if (item.Prices?.ItemPrice) {
+      const p = Array.isArray(item.Prices.ItemPrice) ? item.Prices.ItemPrice[0] : item.Prices.ItemPrice;
+      price = p?.amount || '0';
+    }
+
     const row = {
       'System ID':     String(item.itemID || ''),
       'Item':          item.description || '',
       'Brand':         item.Manufacturer?.name || '',
-      'Category':      item.Category?.name || '',
-      'Subcategory 1': '',
+      'Category':      category,
+      'Subcategory 1': subcat1,
       'Subcategory 2': '',
-      'Price':         `$${parseFloat(item.Prices?.ItemPrice?.amount || 0).toFixed(2)}`,
+      'Price':         `$${parseFloat(price).toFixed(2)}`,
       ' Zafiro Mall Of San Juan ':    '0',
       ' Zafiro Plaza Del Caribe ':    '0',
       ' Zafiro Plaza Del Sol ':       '0',
@@ -289,18 +313,13 @@ function normalizeInventory(items) {
       ' Zafiro Storage ':             '0',
       ' Zafiro Viejo San Juan ':      '0',
     };
+
+    // Map by shopID (not shop name)
     const shops = item.ItemShops?.ItemShop;
     if (shops) {
       (Array.isArray(shops) ? shops : [shops]).forEach(is => {
-        const n = is.Shop?.name || '';
-        const q = String(parseInt(is.qoh || 0));
-        if (n === 'Zafiro Mall Of San Juan')   row[' Zafiro Mall Of San Juan ']    = q;
-        if (n === 'Zafiro Plaza Del Caribe')   row[' Zafiro Plaza Del Caribe ']    = q;
-        if (n === 'Zafiro Plaza Del Sol')       row[' Zafiro Plaza Del Sol ']       = q;
-        if (n === 'Zafiro Plaza Las Américas')  row[' Zafiro Plaza Las Américas  '] = q;
-        if (n === 'Zafiro Sample Sale')         row[' Zafiro Sample Sale  ']        = q;
-        if (n === 'Zafiro Storage')             row[' Zafiro Storage ']             = q;
-        if (n === 'Zafiro Viejo San Juan')      row[' Zafiro Viejo San Juan ']      = q;
+        const col = SHOP_ID_TO_COL[String(is.shopID)];
+        if (col) row[col] = String(parseInt(is.qoh || 0));
       });
     }
     return row;
