@@ -298,13 +298,14 @@ function normalizeInventory(items) {
     }
 
     const row = {
-      'System ID':     String(item.itemID || ''),
+      'System ID':     item.systemSku || String(item.itemID || ''),
       'Item':          item.description || '',
       'Brand':         item.Manufacturer?.name || '',
       'Category':      category,
       'Subcategory 1': subcat1,
       'Subcategory 2': '',
       'Price':         `$${parseFloat(price).toFixed(2)}`,
+      'Tags':          '',
       ' Zafiro Mall Of San Juan ':    '0',
       ' Zafiro Plaza Del Caribe ':    '0',
       ' Zafiro Plaza Del Sol ':       '0',
@@ -322,6 +323,13 @@ function normalizeInventory(items) {
         if (col) row[col] = String(parseInt(is.qoh || 0));
       });
     }
+    // Tags — comes as Tags.Tag (array or object)
+    const tags = item.Tags?.Tag;
+    if (tags) {
+      const tagArr = Array.isArray(tags) ? tags : [tags];
+      row['Tags'] = tagArr.map(t => t.name || t.tagName || '').filter(Boolean).join(',');
+    }
+
     return row;
   });
 }
@@ -404,7 +412,7 @@ async function runSyncBackground(from, to) {
         console.log(`[sync] Inventory: ${inventory.length}`);
         if (inventory.length && SUPABASE_URL) {
           syncState.message = 'Guardando inventario...';
-          await sbUpsert('inventory', inventory.map(item => ({ id: item['System ID'], ...item })));
+          await sbUpsert('inventory', inventory.map(item => ({ id: item['System ID'] || String(item.itemID || ''), ...item })));
           inventory = [];
         }
       } catch(e) { console.error('[sync] Inventory error:', e.message); errors.push({ source:'inventory', error:e.message }); }
@@ -573,7 +581,7 @@ body{font-family:monospace;background:#0d0d1a;color:#F2EDE6;padding:40px;}
       const itemId = query.id || '210000058004';
       try {
         const token = await getLSToken();
-        const path = `/API/V3/Account/${LS_ACCOUNT_ID}/Item/${itemId}.json?load_relations=["ItemShops","Category","Manufacturer"]`;
+        const path = `/API/V3/Account/${LS_ACCOUNT_ID}/Item/${itemId}.json?load_relations=["ItemShops","Category","Manufacturer","Tags"]`;
         const r = await httpGet('api.lightspeedapp.com', path, {
           Authorization: `Bearer ${token}`, Accept: 'application/json',
         });
