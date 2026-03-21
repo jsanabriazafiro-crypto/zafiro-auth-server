@@ -405,7 +405,7 @@ async function runSyncBackground(from, to) {
       if (lastSync) {
         // Only items modified since last sync
         const sinceDate = new Date(lastSync).toISOString().replace('T',' ').slice(0,19);
-        invParams['timeStamp][>='] = sinceDate;
+        invParams['timeStamp'] = `>,${sinceDate}`;
         syncState.message = `Inventario: cambios desde ${sinceDate.slice(0,10)}...`;
         console.log(`[sync] Inventory incremental desde: ${sinceDate}`);
       } else {
@@ -542,7 +542,7 @@ body{font-family:monospace;background:#0d0d1a;color:#F2EDE6;padding:40px;}
       if (!from || !to) return J({ ok:false, error:'Faltan from y to' }, 400);
       const ck = `${from}_${to}`;
       const cached = getCached(ck, 15*60*1000);
-      if (cached) { console.log('[sync] Cache hit'); return J(cached); }
+      if (cached && cached.counts?.transactions > 0) { console.log('[sync] Cache hit'); return J(cached); }
       if (syncState.running && syncState.key === ck)
         return J({ ok:'syncing', progress:syncState.progress, message:syncState.message });
       console.log(`[sync] Iniciando background sync ${from} → ${to}`);
