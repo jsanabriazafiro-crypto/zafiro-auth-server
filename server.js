@@ -538,6 +538,19 @@ body{font-family:monospace;background:#0d0d1a;color:#F2EDE6;padding:40px;}
       return J({ success:true, count:orders.length, orders });
     }
 
+    // DEBUG — ver qué devuelve LS para un item específico
+    if (pathname === '/api/debug/item') {
+      const itemId = query.id || '210000058004';
+      try {
+        const token = await getLSToken();
+        const path = `/API/V3/Account/${LS_ACCOUNT_ID}/Item/${itemId}.json?load_relations=["ItemShops","Category","Manufacturer","Prices"]`;
+        const r = await httpGet('api.lightspeedapp.com', path, {
+          Authorization: `Bearer ${token}`, Accept: 'application/json',
+        });
+        return J({ status: r.status, body: JSON.parse(r.body) });
+      } catch(e) { return J({ error: e.message }, 500); }
+    }
+
     return J({ error:'Not found', path:pathname }, 404);
 
   } catch(err) {
