@@ -626,6 +626,17 @@ body{font-family:monospace;background:#0d0d1a;color:#F2EDE6;padding:40px;}
       return J({ success:true, count:orders.length, orders });
     }
 
+    // DEBUG — ver un customer de Lightspeed
+    if (pathname === '/api/debug/customer') {
+      try {
+        const token = await getLSToken();
+        const r = await httpGet('api.lightspeedapp.com',
+          `/API/V3/Account/${LS_ACCOUNT_ID}/Customer.json?limit=2`,
+          { Authorization: `Bearer ${token}`, Accept: 'application/json' });
+        return J({ status: r.status, body: JSON.parse(r.body) });
+      } catch(e) { return J({ error: e.message }, 500); }
+    }
+
     // DEBUG — ver una transacción específica
     if (pathname === '/api/debug/sale') {
       try {
