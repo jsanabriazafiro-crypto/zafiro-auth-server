@@ -588,7 +588,7 @@ body{font-family:monospace;background:#0d0d1a;color:#F2EDE6;padding:40px;}
         const token = await getLSToken();
         // Get the most recent sale
         const r = await httpGet('api.lightspeedapp.com',
-          `/API/V3/Account/${LS_ACCOUNT_ID}/Sale.json?limit=1&load_relations=["Customer"]&completed=true`,
+          `/API/V3/Account/${LS_ACCOUNT_ID}/Sale.json?limit=1&load_relations=["Customer","Employee","Shop","Register"]&completed=true`,
           { Authorization: `Bearer ${token}`, Accept: 'application/json' });
         return J({ status: r.status, body: JSON.parse(r.body) });
       } catch(e) { return J({ error: e.message }, 500); }
