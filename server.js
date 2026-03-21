@@ -80,43 +80,10 @@ const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_KEY = process.env.SUPABASE_KEY || ''; // service_role key
 
 async function updateRefreshTokenInRender(newToken) {
-  if (!RENDER_API_KEY || !RENDER_SERVICE_ID) {
-    console.log('[Render] Sin API key/service ID — no se puede auto-actualizar el token');
-    return;
-  }
-  try {
-    // Render API v1 PUT /env-vars expects array format
-    const body = JSON.stringify([{ key: 'LS_REFRESH_TOKEN', value: newToken }]);
-    const buf = Buffer.from(body);
-    await new Promise((resolve, reject) => {
-      const req = https.request({
-        hostname: 'api.render.com',
-        path: `/v1/services/${RENDER_SERVICE_ID}/env-vars`,
-        method: 'PUT',
-        headers: {
-          'Authorization': `Bearer ${RENDER_API_KEY}`,
-          'Content-Type': 'application/json',
-          'Content-Length': buf.length,
-        }
-      }, res => {
-        let d = '';
-        res.on('data', c => d += c);
-        res.on('end', () => {
-          if (res.statusCode === 200 || res.statusCode === 204) {
-            console.log('[Render] ✅ LS_REFRESH_TOKEN actualizado en Render env vars');
-          } else {
-            console.log('[Render] ⚠️ Update respondió', res.statusCode, d.slice(0,200));
-          }
-          resolve();
-        });
-      });
-      req.on('error', e => { console.error('[Render] Error:', e.message); resolve(); });
-      req.write(body);
-      req.end();
-    });
-  } catch(e) {
-    console.error('[Render] Error actualizando token:', e.message);
-  }
+  // NOTE: Render PUT /env-vars replaces ALL env vars — disabled to prevent data loss
+  // The refresh token is stored in memory and rotates automatically during sync
+  // If server restarts, visit /lightspeed/start to regenerate
+  console.log('[Render] New refresh token stored in memory (auto-rotate active)');
 }
 
 // ── HTTP helpers ──────────────────────────────────────────────────
@@ -464,6 +431,7 @@ async function runSyncBackground(from, to) {
         if (inventory.length && SUPABASE_URL) {
           syncState.message = 'Guardando inventario en Supabase...';
           await sbUpsert('inventory', inventory.map(item => ({ id: item['System ID'], ...item })));
+          inventory = []; // free memory
           await sbSetLastSync(new Date().toISOString());
           inventory = []; // free memory
         }
