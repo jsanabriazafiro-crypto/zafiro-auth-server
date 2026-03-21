@@ -80,10 +80,39 @@ const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_KEY = process.env.SUPABASE_KEY || ''; // service_role key
 
 async function updateRefreshTokenInRender(newToken) {
-  // NOTE: Render PUT /env-vars replaces ALL env vars — disabled to prevent data loss
-  // The refresh token is stored in memory and rotates automatically during sync
-  // If server restarts, visit /lightspeed/start to regenerate
-  console.log('[Render] New refresh token stored in memory (auto-rotate active)');
+  if (!RENDER_API_KEY || !RENDER_SERVICE_ID) return;
+  try {
+    // Use PATCH to update only LS_REFRESH_TOKEN without affecting other env vars
+    const body = JSON.stringify({ value: newToken });
+    const buf  = Buffer.from(body);
+    await new Promise((resolve) => {
+      const req = https.request({
+        hostname: 'api.render.com',
+        path: `/v1/services/${RENDER_SERVICE_ID}/env-vars/LS_REFRESH_TOKEN`,
+        method: 'PATCH',
+        headers: {
+          'Authorization': `Bearer ${RENDER_API_KEY}`,
+          'Content-Type': 'application/json',
+          'Content-Length': buf.length,
+        }
+      }, res => {
+        let d = '';
+        res.on('data', c => d += c);
+        res.on('end', () => {
+          if (res.statusCode < 300) {
+            console.log('[Render] ✅ LS_REFRESH_TOKEN actualizado');
+          } else {
+            console.log('[Render] ⚠️', res.statusCode, d.slice(0,100));
+          }
+          resolve();
+        });
+      });
+      req.on('error', e => { console.error('[Render]', e.message); resolve(); });
+      req.write(body); req.end();
+    });
+  } catch(e) {
+    console.error('[Render] Error:', e.message);
+  }
 }
 
 // ── HTTP helpers ──────────────────────────────────────────────────
@@ -448,7 +477,7 @@ async function runSyncBackground(from, to) {
     }
 
     const result = { ok:true, ts:new Date().toISOString(), from, to,
-      counts:{ transactions:txCount||transactions.length, lines:linesCount||lines.length, inventory:invCount||inventory.length },
+      counts:{ transactions:transactions.length, lines:lines.length, inventory:inventory.length },
       transactions:[], lines:[], inventory:[], // data is in Supabase, not in memory
       errors: errors.length ? errors : undefined };
 
