@@ -68,6 +68,23 @@ async function sbSetLastSync(ts) {
   await sbUpsert('sync_meta', [{ id: 'last_sync', key: 'last_sync', value: ts }]);
 }
 
+async function sbGetRefreshToken() {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return null;
+  const rows = await sbSelect('app_config');
+  return rows?.find(r => r.key === 'ls_refresh_token')?.value || null;
+}
+
+async function sbSaveRefreshToken(token) {
+  if (!SUPABASE_URL || !SUPABASE_KEY || !token) return;
+  await sbUpsert('app_config', [{ 
+    id: 'ls_refresh_token', 
+    key: 'ls_refresh_token', 
+    value: token,
+    updated_at: new Date().toISOString()
+  }]);
+  console.log('[Supabase] ✅ Refresh token guardado');
+}
+
 let lsAccessToken = '';
 let lsTokenExpiry = 0;
 
@@ -155,8 +172,8 @@ async function getLSToken() {
   lsTokenExpiry = Date.now() + (j.expires_in || 3600) * 1000;
   if (j.refresh_token && j.refresh_token !== LS_REFRESH_TOKEN) {
     LS_REFRESH_TOKEN = j.refresh_token;
-    // Guardar nuevo token en Render para que persista después de reinicios
-    updateRefreshTokenInRender(j.refresh_token);
+    sbSaveRefreshToken(j.refresh_token); // persist to Supabase
+    updateRefreshTokenInRender(j.refresh_token); // best-effort Render update
   }
   console.log('[LS] Token OK, expira en', j.expires_in, 's');
   return lsAccessToken;
@@ -577,7 +594,8 @@ http.createServer(async (req, res) => {
       lsTokenExpiry = Date.now() + (d.expires_in||3600)*1000;
       if (d.refresh_token) {
         LS_REFRESH_TOKEN = d.refresh_token;
-        updateRefreshTokenInRender(d.refresh_token);
+        sbSaveRefreshToken(d.refresh_token); // persist to Supabase
+        updateRefreshTokenInRender(d.refresh_token); // best-effort Render update
       }
       return H(`<!DOCTYPE html><html><head><meta charset="UTF-8"/><style>
 body{font-family:monospace;background:#0d0d1a;color:#F2EDE6;padding:40px;}
