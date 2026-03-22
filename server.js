@@ -79,6 +79,22 @@ async function sbUpsert(table, rows) {
   }
 }
 
+async function sbSelectFiltered(table, filterQuery) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return [];
+  return new Promise((resolve) => {
+    const u = new URL(`${SUPABASE_URL}/rest/v1/${table}${filterQuery}`);
+    const req = https.request({
+      hostname: u.hostname, path: u.pathname + u.search, method: 'GET',
+      headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Accept': 'application/json', 'Range': '0-999999' }
+    }, res => {
+      let d = ''; res.on('data', c => d += c);
+      res.on('end', () => { try { resolve(JSON.parse(d)); } catch(e) { resolve([]); } });
+    });
+    req.on('error', () => resolve([])); req.end();
+  });
+}
+
 async function sbSelect(table) {
   if (!SUPABASE_URL || !SUPABASE_KEY) return [];
   return new Promise((resolve) => {
@@ -400,7 +416,6 @@ async function runSyncBackground(from, to) {
       const raw = await lsFetchAll('Sale', {
         load_relations: JSON.stringify(['Customer']),
         timeStamp: `><,${from}T00:00:00-04:00,${to}T23:59:59-04:00`,
-        completed: 'true',
       }, (n, total) => {
         syncState.message = `Transacciones: ${n}${total?'/'+total:''}...`;
         syncState.progress = Math.min(10 + Math.round(n/(total||65000)*30), 40);
@@ -535,14 +550,23 @@ http.createServer(async (req, res) => {
     if (pathname === '/api/data') {
       if (!SUPABASE_URL) return J({ ok:false, error:'Supabase not configured' }, 503);
       try {
-        console.log('[Supabase] Loading data...');
+        const { from, to } = query;
+        console.log(`[Supabase] Loading data ${from||'all'} → ${to||'all'}`);
+
+        // Build date filters for Supabase
+        const txFilter  = from && to ? `?select=*&Date=gte.${from}&Date=lte.${to} 23:59:59` : '?select=*';
+        const slFilter  = from && to ? `?select=*&Date=gte.${from}&Date=lte.${to}` : '?select=*';
+
         const [transactions, lines, inventory] = await Promise.all([
-          sbSelect('transactions'), sbSelect('lines'), sbSelect('inventory'),
+          sbSelectFiltered('transactions', txFilter),
+          sbSelectFiltered('lines', slFilter),
+          sbSelect('inventory'),
         ]);
+
         const lastSync = await sbGetLastSync();
         console.log(`[Supabase] Loaded: ${transactions.length} tx, ${lines.length} lines, ${inventory.length} items`);
         return J({ ok:true, ts:lastSync||new Date().toISOString(),
-          from:'2025-01-01', to:new Date().toISOString().slice(0,10),
+          from: from||'2019-01-01', to: to||new Date().toISOString().slice(0,10),
           counts:{ transactions:transactions.length, lines:lines.length, inventory:inventory.length },
           transactions, lines, inventory });
       } catch(e) { return J({ ok:false, error:e.message }, 500); }
